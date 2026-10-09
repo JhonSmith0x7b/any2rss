@@ -1,0 +1,31 @@
+name: any2rss
+services:
+  web:
+    image: ${ANY2RSS_IMAGE:?Set ANY2RSS_IMAGE to an immutable release image}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8200:8000"
+    env_file:
+      - path: /opt/any2rss/runtime.env
+        format: raw
+    environment:
+      ANY2RSS_REQUIRE_AUTH: "1"
+      ANY2RSS_DB: /data/any2rss.sqlite3
+    volumes:
+      - /opt/any2rss/data:/data
+    shm_size: "256mb"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

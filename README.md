@@ -1,0 +1,48 @@
+# any2rss
+
+将网页或 RSS 转为持久化 RSS 2.0，支持通过 AI Agent 生成网页提取规则，以及可选 LLM 翻译。
+
+## 运行
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m playwright install chromium
+.venv/bin/uvicorn any2rss.app:app --host 127.0.0.1 --port 8000
+```
+
+打开 <http://127.0.0.1:8000/>，首页列出自己添加的订阅；点击新建打开配置，点击详情查看该源的配置、进度和最近文章。
+
+- 网页来源：输入网址和需求，复制提示词交给可访问网页的 Agent，粘贴返回 JSON。支持 HTTP、Playwright、列表分页及正文排除规则。
+- RSS 来源：填入 RSS 2.0 地址即可。
+- 可选 DeepSeek 翻译：在本机 `.env` 设置 `DEEPSEEK_API_KEY`，模型 `deepseek-flash`，语言支持简体中文、英语和日语。密钥不写入订阅 JSON。
+- 发布按真实条目上限抓取并执行插件，整轮成功后提供 `/feeds/{id}.xml`；每 3 秒更新页面进度。定时更新由 Web 服务调度，须保持服务运行。
+- 详情中可编辑或删除。编辑保留 RSS 地址，成功后原子切换新内容；失败保留上版 RSS。删除停止调度并关闭 RSS 入口，本机历史记录保留，ID 暂不重复使用。
+- SQLite 默认位于 `data/any2rss.sqlite3`，可用 `ANY2RSS_DB` 更改。翻译缓存持久化，订阅读取不调用模型。
+
+三个早期内置示例已停用，不再列出、提供 RSS 或后台采集。旧历史数据及解析代码保留；不需要启动旧 `any2rss.worker`。
+
+## Docker
+
+```sh
+docker compose up -d --build
+```
+
+Compose 只运行 Web 服务，共享 `data/` 并从 `.env` 读取翻译密钥，默认绑定本机 8000 端口。本地默认不启用登录；公网部署必须启用账号认证。
+
+## 验证
+
+```sh
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q
+```
+
+测试使用临时数据库。旧示例的回归测试显式启用归档兼容路径，不代表运行服务仍提供内置订阅。
+
+协议见 [配置规范](docs/configuration.md)。`GET /api/subscriptions` 获取列表，`GET /api/subscriptions/{id}` 获取详情；`PUT` 修改、`DELETE` 删除；`POST /api/config/publish` 发布。
+
+## 公网部署
+
+生产部署说明见 [deploy/README.md](deploy/README.md)。生产模式强制登录，RSS 地址使用独立的只读签名令牌，可直接交给 RSS 阅读器；令牌相当于该订阅的阅读权限，请勿公开分享。页面和 API 需要登录，健康检查 `/healthz` 不包含订阅信息。
+
+GitHub Actions 在 `main` 分支测试通过后，通过受限 SSH 密钥部署到现有服务器。密钥、登录凭据、数据库和翻译 API Key 均不进入仓库。

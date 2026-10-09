@@ -1,0 +1,14 @@
+.venv
+.browsers
+data
+.git
+__pycache__
+.pytest_cache
+
+.env
+.env.*
+
+.secrets/
+*.pem
+*.key
+deployment-credentials*
