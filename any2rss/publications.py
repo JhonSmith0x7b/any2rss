@@ -73,8 +73,13 @@ def reserve(config):
             # An unsuccessful initial attempt may be corrected and submitted again.
             row = db.execute('SELECT status FROM publications WHERE id=?', (identifier,)).fetchone()
             count = db.execute('SELECT COUNT(*) FROM syndicated_articles WHERE source=?', (identifier,)).fetchone()[0]
-            if row[0] != 'failed' or count:
+            if row[0] != 'deleted' and (row[0] != 'failed' or count):
                 raise ValueError('这个订阅标识已存在，请使用新的标识；不会覆盖已发布订阅。') from None
+            if row[0] == 'deleted':
+                # Reuse the identifier as a fresh subscription. Keep revisions
+                # increasing so an old in-flight task cannot publish into it.
+                db.execute('DELETE FROM syndicated_articles WHERE source=?', (identifier,))
+                db.execute('UPDATE publications SET published_config=NULL WHERE id=?', (identifier,))
             db.execute('UPDATE publications SET config=?,status=?,error=NULL,next_run=0,updated_at=?,revision=revision+1 WHERE id=?',
                        (config.model_dump_json(), 'pending', storage.now(), identifier))
         clear_progress(db, identifier)

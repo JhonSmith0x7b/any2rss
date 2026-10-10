@@ -286,7 +286,6 @@ def test_delete_hides_feed_detail_and_catalog_but_retains_recoverable_data(clien
     assert not publications.listing()
     assert 'my-books' not in {item['id'] for item in publications.subscription_listing()}
     assert storage.articles(source='my-books')
-    assert client.post('/api/config/publish', json=draft()).status_code == 409
     assert client.put('/api/subscriptions/my-books', json=draft()).status_code == 404
     run = AsyncMock()
     monkeypatch.setattr(publications, 'run_one', run)
@@ -296,6 +295,28 @@ def test_delete_hides_feed_detail_and_catalog_but_retains_recoverable_data(clien
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(publications.scheduler())
     run.assert_not_awaited()
+
+
+def test_deleted_identifier_can_be_recreated_without_old_articles(client, monkeypatch):
+    publish(client)
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[article('old')]))
+    asyncio.run(publications.run_one('my-books'))
+    assert client.delete('/api/subscriptions/my-books').status_code == 200
+    changed = draft()
+    changed['source']['url'] = 'https://example.com/new.xml'
+    pending = publish(client, changed)
+    assert pending['count'] == 0 and pending['feed_url'] is None
+    assert publications.get('my-books')['published_config'].source.url == changed['source']['url']
+    assert client.get('/feeds/my-books.xml').status_code == 503
+    monkeypatch.setattr(execution, 'collect', AsyncMock(side_effect=ValueError('unavailable')))
+    asyncio.run(publications.run_one('my-books'))
+    assert not storage.articles(source='my-books')
+    publish(client, changed)  # A failed fresh attempt can still be corrected.
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[article('new')]))
+    asyncio.run(publications.run_one('my-books'))
+    assert [a['guid'] for a in storage.articles(source='my-books')] == ['new']
+    assert client.get('/feeds/my-books.xml').status_code == 200
+    assert client.post('/api/config/publish', json=changed).status_code == 409
 
 
 def test_edit_delete_boundaries_and_capabilities(client):
@@ -315,7 +336,7 @@ def test_edit_delete_boundaries_and_capabilities(client):
     assert publications.get('my-books')['status'] == 'pending'
 
 
-@pytest.mark.parametrize('action', ['edit', 'delete'])
+@pytest.mark.parametrize('action', ['edit', 'delete', 'recreate'])
 @pytest.mark.parametrize('stage', ['collect', 'translate'])
 @pytest.mark.parametrize('fails', [False, True])
 def test_stale_run_cannot_publish_progress_or_errors(client, monkeypatch, action, stage, fails):
@@ -327,6 +348,8 @@ def test_stale_run_cannot_publish_progress_or_errors(client, monkeypatch, action
             assert client.put('/api/subscriptions/my-books', json=changed).status_code == 202
         else:
             assert client.delete('/api/subscriptions/my-books').status_code == 200
+            if action == 'recreate':
+                publish(client)
         if fails:
             raise RuntimeError('stale failure')
     async def collect(config, limit, *, progress):
@@ -342,12 +365,16 @@ def test_stale_run_cannot_publish_progress_or_errors(client, monkeypatch, action
     monkeypatch.setattr(execution, 'collect', collect)
     monkeypatch.setattr(publications, 'build', lambda options: plugin)
     asyncio.run(publications.run_one('my-books'))
-    assert [a['guid'] for a in storage.articles(source='my-books')] == ['existing']
+    assert [a['guid'] for a in storage.articles(source='my-books')] == ([] if action == 'recreate' else ['existing'])
     assert storage.status('my-books').get('progress') is None
     value = publications.get('my-books')
     if action == 'edit':
         assert value['status'] == 'pending' and value['error'] is None
         assert value['config'].output.title == 'Edited title'
+    elif action == 'recreate':
+        assert value['status'] == 'pending' and value['error'] is None
+        assert value['revision'] == 3
+        assert client.get('/feeds/my-books.xml').status_code == 503
     else:
         assert value is None
         assert client.get('/feeds/my-books.xml').status_code == 404
