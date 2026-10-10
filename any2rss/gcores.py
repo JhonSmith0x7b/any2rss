@@ -42,6 +42,18 @@ def _atomic(entity: dict) -> str:
         if data.get("caption"):
             result += f'<p>{escape(str(data["caption"]))}</p>'
         return result
+    if kind == "WIDGET" and data.get("type") == "normal":
+        url = _url(data.get("url"))
+        title = data.get("title") or data.get("url")
+        info = data.get("info") or ""
+        if not isinstance(title, str) or not isinstance(info, str):
+            raise ValueError("机核链接卡片格式无效")
+        result = f'<p><a href="{url}">{escape(title)}</a></p>'
+        if info:
+            result += f'<p>{escape(info)}</p>'
+        if data.get("image"):
+            result += _figure({"path": data["image"], "caption": title})
+        return result
     raise ValueError(f"机核正文包含暂不支持的媒体类型：{kind}")
 
 

@@ -76,3 +76,31 @@ def test_adjacent_numbered_list_items_share_list():
     assert len(soup.select('ol')) == 1
     assert [item.text for item in soup.select('ol > li')] == ['one', 'two']
     assert soup.p.text == 'after'
+
+
+def test_normal_widget_preserves_link_text_and_image_through_cleaning():
+    from any2rss.chinawriter import _clean_content
+    html = render_body(payload([{'text': 'Before'}, atomic(0), {'text': 'After'}], {
+        '0': {'type': 'WIDGET', 'data': {
+            'type': 'normal', 'url': 'https://show.bilibili.com/platform/detail.html?id=1006340',
+            'title': '获取门票<script>', 'info': '购票入口', 'image': 'ticket.png',
+        }},
+    }))
+    soup = BeautifulSoup(html, 'html.parser')
+    cleaned = BeautifulSoup(_clean_content(soup, 'https://www.gcores.com/articles/220700'), 'html.parser')
+    assert cleaned.a['href'].endswith('id=1006340')
+    assert cleaned.a.text == '获取门票<script>'
+    assert cleaned.img['src'] == 'https://image.gcores.com/ticket.png'
+    assert not cleaned.script
+    assert '购票入口' in cleaned.get_text()
+    assert cleaned.get_text().startswith('Before') and cleaned.get_text().endswith('After')
+
+
+@pytest.mark.parametrize('data', [
+    {'type': 'normal', 'url': 'javascript:alert(1)'},
+    {'type': 'normal', 'url': 'https://example.com', 'image': '//evil.example/a.png'},
+    {'type': 'unknown', 'url': 'https://example.com'},
+])
+def test_unsafe_or_unknown_widgets_fail(data):
+    with pytest.raises(ValueError):
+        render_body(payload([atomic(0)], {'0': {'type': 'WIDGET', 'data': data}}))
