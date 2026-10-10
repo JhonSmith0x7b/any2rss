@@ -70,14 +70,19 @@ def _clean_content(content, url: str) -> str:
         attrs = {}
         if tag.name in {"a", "img"}:
             attr = "href" if tag.name == "a" else "src"
-            value = tag.get(attr) or (tag.get("data-src") if tag.name == "img" else None)
-            if value:
+            # Lazy-loaded images may keep a transparent placeholder in src.
+            # Promote the real URL before discarding non-HTTP image sources.
+            values = [tag.get("data-src"), tag.get("src")] if tag.name == "img" else [tag.get(attr)]
+            for value in values:
+                if not isinstance(value, str) or not value.strip():
+                    continue
                 try:
                     resolved = _safe_url(value, url)
                 except ValueError:
                     resolved = None
                 if resolved:
                     attrs[attr] = resolved
+                    break
             if tag.get("title"):
                 attrs["title"] = tag["title"]
             if tag.name == "img":

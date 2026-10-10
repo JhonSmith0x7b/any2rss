@@ -168,3 +168,30 @@ def test_redirect_cycle_reported_without_repeating_request(monkeypatch):
     with pytest.raises(ValueError, match='循环重定向'):
         execution.fetch('http://example.com/')
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('attrs,expected', [
+    ('src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///w==" data-src="https://imgpai.thepaper.cn/article.jpg"', 'https://imgpai.thepaper.cn/article.jpg'),
+    ('src="/placeholder.gif" data-src="//cdn.example.com/photo.jpg"', 'https://cdn.example.com/photo.jpg'),
+    ('data-src="/real.jpg"', 'https://example.com/real.jpg'),
+    ('data-src="javascript:alert(1)" src="/real.jpg"', 'https://example.com/real.jpg'),
+    ('data-src=" " src="/real.jpg"', 'https://example.com/real.jpg'),
+    ('data-src="javascript:alert(1)" src="data:image/gif;base64,AA"', None),
+])
+def test_lazy_images_survive_extraction_and_rss(attrs, expected):
+    from bs4 import BeautifulSoup
+    from defusedxml import ElementTree
+    from any2rss.feed import render
+    html = ARTICLE.replace('<img src="/pic.png" onerror="bad()">',
+                           '<figure><img ' + attrs + ' onerror="bad()" alt="插图"><figcaption>图注</figcaption></figure>')
+    article = execution.parse_web(html, 'https://example.com/a', config().source)
+    rss = ElementTree.fromstring(render([article], metadata={'title': 'Images', 'link': 'https://example.com/'}))
+    content = BeautifulSoup(rss.findtext('./channel/item/{http://purl.org/rss/1.0/modules/content/}encoded'), 'html.parser')
+    assert content.find('figcaption').text == '图注'
+    image = content.find('img')
+    if expected is None:
+        assert image is None
+    else:
+        assert image['src'] == expected
+        assert image['alt'] == '插图'
+        assert 'data-src' not in image.attrs and 'onerror' not in image.attrs
