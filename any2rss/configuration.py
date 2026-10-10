@@ -94,6 +94,7 @@ class ExtractionField(StrictModel):
 
 
 class BodyField(ExtractionField):
+    adapter: Literal['gcores'] | None = None
     exclude_selectors: list[str] = Field(default_factory=list, max_length=30)
 
     @field_validator('exclude_selectors')
@@ -155,6 +156,8 @@ class WebSource(StrictModel):
 
     @model_validator(mode='after')
     def valid_source(self):
+        if self.article.body.adapter == 'gcores' and urlsplit(self.url).hostname not in {'www.gcores.com', 'gcores.com'}:
+            raise ValueError('gcores 正文适配器仅适用于机核网站')
         if self.pagination.mode == 'scroll' and self.loading.method != 'playwright':
             raise ValueError('滚动加载需要 Playwright')
         try:
@@ -235,7 +238,7 @@ def make_prompt(url, goal):
 工作方式：
 1. 使用浏览器或 HTTP 查看真实页面。先检查页面是否公开提供 RSS；若有且满足需求，优先返回 type=rss，避免不必要的网页采集。
 2. 否则分析文章列表，并打开至少 3 篇不同文章（不足 3 篇时检查所有可用文章）验证选择器，不能根据 URL 或常见模板猜测。
-3. HTTP 能获取内容时选择 http；需要 JavaScript 才选择 playwright，并填写稳定的等待元素选择器。只使用标准 CSS，不使用 XPath、:has-text() 等 Playwright 扩展。
+3. HTTP 能获取内容时选择 http；需要 JavaScript 才选择 playwright，并填写稳定的等待元素选择器。只使用标准 CSS，不使用 XPath、:has-text() 等 Playwright 扩展。 机核 gcores.com 的公开文章可在 article.body 中设置 adapter="gcores"：系统通过机核公开正文接口读取完整文字、插图、GIF 和图集，按原文顺序展开，不依赖滚动。列表、标题、作者和日期仍按 CSS 规则读取，正文 selector 保留真实正文容器选择器；该适配器仅支持机核 /articles/数字ID，受权限限制或未知正文类型会明确报错。其他站不要使用此值。
 4. list.item_selector 必须选中文章链接本身，读取 href；解析相对 URL、去掉 fragment，并按绝对 URL 去重。避免导航、广告、专题入口和登录链接。
 5. article 字段在文章详情页取首个匹配元素。title 用 text；body 用 html（元素内部 HTML）。正文含推荐卡片、广告等杂项时，选完整正文共同容器，并在 body.exclude_selectors 数组填写需删除的后代节点的标准 CSS 选择器；先在容器副本中删除这些节点及其子树，再取内部 HTML，保留删除节点前后的正文。排除范围仅限正文容器内部，不删除容器本身。script、style 等非正文节点也可明确排除。不要为了避开推荐卡片只选第一段，也不要用正则清理 HTML。字段读取后 trim；可选 regex 仅含一个捕获组，取该组作为字段值。date_format 使用 Python strptime 格式，timezone 使用 IANA 时区。
 6. 正文必须保留文章插图及图注，不要在 exclude_selectors 中排除正文 img、figure 或图片容器。系统会优先将 img 的有效 data-src 转为绝对 src，再回退到有效 src，支持这种懒加载图片；不要因此省略图片或判定配置不可用。请在样本中检查带图片的文章；其他懒加载形式的限制应如实记入 notes。author 或 published_at 无可靠规则时填 null，不杜撰作者或日期。作者若混在来源信息中，需要可靠的单捕获组 regex；不能将整段来源与时间冒充作者。

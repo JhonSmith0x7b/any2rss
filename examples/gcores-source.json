@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "source": {
+    "type": "webpage",
+    "url": "https://www.gcores.com/articles",
+    "loading": {"method": "http"},
+    "list": {"item_selector": "a.original_imgArea_cover[href^='/articles/']", "link_attribute": "href"},
+    "article": {
+      "title": {"selector": "h1.originalPage_title", "read": "text"},
+      "body": {"selector": ".public-DraftEditor-content", "read": "html", "adapter": "gcores"},
+      "published_at": {"selector": ".originalPage_userInfo span[title]", "read": "attribute", "attribute": "title", "date_format": "%Y-%m-%d %H:%M:%S"},
+      "author": {"selector": ".originalPage_userInfo .avatar_text", "read": "text"}
+    },
+    "pagination": {"mode": "none", "max_pages": 1},
+    "timezone": "Asia/Shanghai",
+    "notes": ["仅采集文章列表第一页的公开文章。正文通过机核公开接口转换，保留普通图片、GIF、图集和图注；权限限制或不支持的媒体类型会明确报错。", "已验证样本 /articles/219142 的 98 张图片与 /articles/220718 的 4 张 GIF。"]
+  }
+}

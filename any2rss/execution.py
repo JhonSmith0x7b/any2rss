@@ -6,6 +6,7 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import ssl
@@ -146,11 +147,16 @@ def extract_field(soup, rule, name):
     return value
 
 
-def parse_web(html, url, source):
+def parse_web(html, url, source, *, body_html=None):
     soup = BeautifulSoup(html, 'html.parser')
     title = extract_field(soup, source.article.title, 'title')
-    body = extract_field(soup, source.article.body, 'body')
+    body = extract_field(soup, source.article.body, 'body') if body_html is None else body_html
     content = BeautifulSoup(body, 'html.parser')
+    if body_html is not None:
+        for selector in source.article.body.exclude_selectors:
+            for child in content.select(selector):
+                if child.parent is not None:
+                    child.decompose()
     content_html = _clean_content(content, url)
     text = content.get_text(' ', strip=True)
     if not title or (not text and not content.find('img')):
@@ -285,7 +291,20 @@ async def _collect(config, limit, progress):
         for number, url in enumerate(links[:limit], start=1):
             html, final_url = await load(url, source.article.body.selector if page else None)
             try:
-                article = await asyncio.to_thread(parse_web, html, final_url, source)
+                body_html = None
+                if source.article.body.adapter == 'gcores':
+                    from .gcores import render_body
+                    parts = urlsplit(final_url)
+                    match = re.fullmatch(r'/articles/([0-9]+)/?', parts.path)
+                    if parts.hostname not in {'www.gcores.com', 'gcores.com'} or not match:
+                        raise ValueError('gcores 适配器要求机核 /articles/数字ID 文章链接')
+                    data, _, _ = await asyncio.to_thread(fetch, 'https://www.gcores.com/gapi/v1/articles/' + match[1])
+                    payload = json.loads(data)
+                    resource = payload.get('data') if isinstance(payload, dict) else None
+                    if not isinstance(resource, dict) or str(resource.get('id')) != match[1]:
+                        raise ValueError('机核接口返回的文章 ID 不匹配')
+                    body_html = await asyncio.to_thread(render_body, payload)
+                article = await asyncio.to_thread(parse_web, html, final_url, source, body_html=body_html)
             except ValueError as exc:
                 raise ValueError(f'{url}：{exc}') from exc
             if not any(item['url'] == article['url'] for item in articles):

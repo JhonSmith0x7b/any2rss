@@ -1,4 +1,5 @@
 import asyncio
+import json
 from copy import deepcopy
 import socket
 
@@ -86,6 +87,49 @@ def test_empty_list_is_actionable(monkeypatch):
     monkeypatch.setattr(execution, 'fetch', lambda url: (b'<p>none</p>', url, 'text/html'))
     with pytest.raises(ValueError, match='列表选择器'):
         asyncio.run(execution.collect(config(), 1))
+
+
+@pytest.mark.parametrize('returned_id', ['123', '456'])
+def test_gcores_adapter_collects_body_and_checks_identity(monkeypatch, returned_id):
+    value = config().model_dump()
+    value['source']['url'] = 'https://www.gcores.com/articles'
+    value['source']['article']['body']['adapter'] = 'gcores'
+    cfg = DraftConfig.model_validate(value)
+    payload = {'data': {'id': returned_id, 'attributes': {'content': json.dumps({
+        'blocks': [
+            {'type': 'unstyled', 'text': 'Full article'},
+            {'type': 'atomic', 'entityRanges': [{'key': 0}]},
+        ],
+        'entityMap': {'0': {'type': 'IMAGE', 'data': {'path': 'complete.gif', 'caption': 'Caption'}}},
+    })}}}
+    pages = {
+        cfg.source.url: '<div class="article"><a href="/articles/123">A</a></div>',
+        'https://www.gcores.com/articles/123': ARTICLE,
+        'https://www.gcores.com/gapi/v1/articles/123': json.dumps(payload),
+    }
+    monkeypatch.setattr(execution, 'fetch', lambda url: (pages[url].encode(), url, 'text/html'))
+    if returned_id != '123':
+        with pytest.raises(ValueError, match='ID 不匹配'):
+            asyncio.run(execution.collect(cfg, 1))
+        return
+    from any2rss.feed import render, CONTENT
+    import xml.etree.ElementTree as ET
+    items = asyncio.run(execution.collect(cfg, 1))
+    xml = ET.fromstring(render(items, metadata={'title': 'Test', 'link': cfg.source.url}))
+    body = xml.findtext('./channel/item/{' + CONTENT + '}encoded')
+    assert 'Full article' in body and 'Caption' in body
+    assert 'https://image.gcores.com/complete.gif' in body
+    assert 'First' not in body  # Incomplete HTML body must not be used.
+
+
+def test_adapter_scope_and_body_exclusions():
+    value = config().model_dump()
+    value['source']['article']['body']['adapter'] = 'gcores'
+    with pytest.raises(ValueError, match='仅适用于机核'):
+        DraftConfig.model_validate(value)
+    body = '<p>Keep</p><div class="related">Remove</div><img src="https://image.gcores.com/a.jpg">'
+    result = execution.parse_web(ARTICLE, 'https://example.com/a', config().source, body_html=body)
+    assert 'Keep' in result['content_html'] and 'Remove' not in result['content_html']
 
 
 def test_redirect_cannot_reach_private_address(monkeypatch):
