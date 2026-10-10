@@ -15,6 +15,20 @@ label{display:block;font-size:12px;font-weight:400;margin:17px 0 7px;color:#c3c3
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 .dashboard-hero{flex-direction:row;text-align:left;justify-content:space-between;align-items:center;margin:30px 0 34px}.dashboard-hero h1{font-size:30px;margin-bottom:8px}.dashboard-hero .hint{font-size:13px}.dashboard-hero .eyebrow{margin-bottom:8px}.dialog-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:24px}.dialog-head .eyebrow{margin-bottom:6px}.dialog-head h2{font-size:22px;color:var(--deep)}#config-dialog{width:min(1120px,95vw);max-height:92vh;padding:28px}#detail-dialog{width:min(800px,94vw);max-height:90vh;padding:28px}.feed-address{display:block;overflow-wrap:anywhere;margin-top:16px;font-size:12px}#detail-content{margin-top:24px}.detail-article{padding:15px 0;border-bottom:1px solid var(--line)}.detail-article:first-child{padding-top:0}.detail-article>a{font-size:14px}.detail-article .hint{margin-top:5px}.article-summary{font-size:12px;color:#b0b0b0;margin-top:8px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.detail-note{margin-top:24px}#detail-json{font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;background:#171717;padding:14px}summary{cursor:pointer;color:var(--deep);font-size:12px}.publication-row>div:first-child{font-weight:600;font-size:16px;color:#eee;margin-bottom:6px}.publication-row .actions>a{font-size:12px}.publication-row{background:#1b1b1b}.subscription-list{gap:18px}#subscriptions{padding-top:22px}#config-dialog .panel:first-child{padding-top:18px}@media(max-width:620px){.dashboard-hero{flex-direction:row;gap:15px;margin:18px 0 28px}.dashboard-hero h1{font-size:26px}.dashboard-hero .hint{font-size:11px}.dashboard-hero .eyebrow{font-size:8px}.dashboard-hero .button{white-space:nowrap}#config-dialog,#detail-dialog{padding:18px}.dialog-head h2{font-size:20px}}
 .button.danger{color:#ffad98;border-color:#88594d}.button.danger:hover:not(:disabled){color:#ffc6b8;border-color:#ffad98}input[readonly]{color:var(--muted);background:#222}
+
+/* Page position navigation; independent of collection progress. */
+.position-nav{position:fixed;left:10px;top:50%;transform:translateY(-50%);width:44px;max-height:70vh;overflow-y:auto;overflow-x:clip;display:flex;flex-direction:column;align-items:flex-start;z-index:5;scrollbar-width:none;padding:6px}
+.position-nav button{flex-shrink:0;display:block;width:32px;height:24px;padding:0;border:0;background:transparent;color:var(--muted);text-align:left}
+.position-nav button::before{content:"";display:block;height:2px;width:10px;background:#555;transition:width .15s,background .15s}
+.position-nav button:hover::before,.position-nav button:focus-visible::before{width:22px;background:var(--ink)}
+.position-nav button[aria-current=location]::before{width:30px;background:var(--deep)}
+.position-label{position:fixed;left:62px;top:50%;transform:translateY(-50%);max-width:260px;padding:10px 14px;background:#292929;border:1px solid #444;border-radius:4px;color:var(--ink);font-size:12px;overflow-wrap:anywhere;pointer-events:none;z-index:6}
+.page-position{position:fixed;top:0;left:0;width:100%;height:3px;background:#353535;z-index:10;pointer-events:none}
+.page-position span{display:block;height:100%;background:var(--deep);transform:scaleX(0);transform-origin:left}
+.position-target{scroll-margin-top:24px}
+body:has(dialog[open])>.position-nav,body:has(dialog[open])>.position-label,body:has(dialog[open])>.page-position{display:none}
+@media(min-width:901px){.shell{padding-left:64px}#config-dialog{padding-left:64px}#config-dialog .position-nav{left:max(calc((100vw - 1120px)/2 + 8px),calc(2.5vw + 8px))}#config-dialog .position-label{left:max(calc((100vw - 1120px)/2 + 54px),calc(2.5vw + 54px))}.page-position{display:none}}
+@media(max-width:900px){.position-nav,.position-label{display:none}}
 </style>
 </head>
 <body>
@@ -184,7 +198,7 @@ async function refreshPublications(){
  if(!data.items.length){const empty=document.createElement('p');empty.className='hint';empty.textContent='暂无订阅，点击「新建订阅」开始创建。';list.append(empty)}
  for(const item of data.items){
   if(!publicationIdPattern.test(item.id))continue;
-  const row=document.createElement('div');row.className='publication-row';const title=document.createElement('div');title.textContent=item.title||item.id;row.append(title);
+  const row=document.createElement('div');row.className='publication-row position-target';row.id='subscription-'+item.id;row.dataset.positionLabel=item.title||item.id;const title=document.createElement('div');title.textContent=item.title||item.id;row.append(title);
   const info=document.createElement('p');info.className='hint';info.textContent=(item.kind==='builtin'?'内置':'自定义')+' · '+(item.source_type==='rss'?'RSS → RSS':'网页 → RSS')+(item.translated?' · AI 翻译':' · 原文')+' · '+(publicationLabels[item.status]||'未知状态');row.append(info);
   const progress=document.createElement('div');progress.className='publication-progress';renderProgress(progress,item);row.append(progress);
   const actions=document.createElement('div');actions.className='actions';const watch=document.createElement('button');watch.className='button';watch.textContent='查看详情';watch.setAttribute('aria-label','查看 '+(item.title||item.id)+' 的详情');watch.addEventListener('click',()=>openDetail(item.id));actions.append(watch);
@@ -253,6 +267,51 @@ $('refresh-publications').addEventListener('click',loadPublications);
 $('copy-feed').addEventListener('click',async()=>{const link=$('publication-link');if(!link.getAttribute('href'))return;try{await navigator.clipboard.writeText(link.href);$('copy-feed').textContent='已复制';setTimeout(()=>$('copy-feed').textContent='复制订阅地址',2000)}catch{publicationStatus('自动复制不可用，请选中上方订阅地址手动复制。',true)}});
 $('logout').addEventListener('click',async()=>{const button=$('logout');button.disabled=true;try{await request('/api/auth/logout',{method:'POST',body:'{}'});location.replace(APP_BASE+'/login')}catch{$('auth-error').textContent='退出失败，请重试。';button.disabled=false}});
 request('/api/auth/status').then(data=>{$('logout').hidden=!data.enabled;if(data.enabled&&!data.username)location.replace(APP_BASE+'/login')}).catch(()=>{});
+
+// Each scroll surface owns its navigation, including the modal's top layer.
+function positionNavigation(surface, targets){
+ const modal=surface instanceof HTMLDialogElement,host=modal?surface:document.body;
+ const nav=document.createElement('nav');nav.className='position-nav';nav.setAttribute('aria-label',modal?'配置区块导航':'订阅位置导航');
+ const label=document.createElement('div');label.className='position-label';label.hidden=true;
+ const line=document.createElement('div');line.className='page-position';line.setAttribute('aria-hidden','true');line.innerHTML='<span></span>';
+ host.append(nav,label,line);
+ let entries=[],signature='',frame=0,current=null;
+ const scrollRoot=()=>modal?surface:document.scrollingElement;
+ function update(){
+  frame=0;if(modal&&!surface.open)return;
+  const nodes=targets(),next=JSON.stringify(nodes.map(n=>[n.id,n.dataset.positionLabel]));
+  entries=nodes;
+  if(next!==signature){
+   signature=next;nav.replaceChildren();label.hidden=true;
+   for(const node of entries){
+    const button=document.createElement('button');button.type='button';button.setAttribute('aria-label','跳转到 '+node.dataset.positionLabel);button.setAttribute('aria-controls',node.id);
+    button.addEventListener('click',()=>{const target=document.getElementById(node.id);if(!target)return;current=node.id;const root=scrollRoot(),top=modal?surface.getBoundingClientRect().top+surface.clientTop:0;root.scrollTo({top:root.scrollTop+target.getBoundingClientRect().top-top-24,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});schedule()});
+    const show=()=>{label.textContent=node.dataset.positionLabel;label.hidden=false};
+    button.addEventListener('mouseenter',show);button.addEventListener('focus',show);button.addEventListener('mouseleave',()=>{label.hidden=true});button.addEventListener('blur',()=>{label.hidden=true});nav.append(button);
+   }
+  }
+  const root=scrollRoot(),range=root.scrollHeight-root.clientHeight;
+  line.hidden=range<=1;line.firstElementChild.style.transform='scaleX('+Math.max(0,Math.min(1,range>0?root.scrollTop/range:0))+')';
+  nav.hidden=!entries.length;
+  const top=modal?surface.getBoundingClientRect().top+surface.clientTop:0,anchor=top+Math.min(root.clientHeight*.25,140);
+  let best=null,distance=Infinity;
+  for(const node of entries){const delta=Math.abs(node.getBoundingClientRect().top-anchor);if(delta<distance-1||(Math.abs(delta-distance)<1&&node.id===current)){best=node;distance=delta}}
+  if(range>1&&root.scrollTop>=range-2)best=entries.at(-1);
+  current=best?.id;
+  [...nav.children].forEach((button,index)=>{if(entries[index].id===current)button.setAttribute('aria-current','location');else button.removeAttribute('aria-current')});
+ }
+ function schedule(){if(!frame)frame=requestAnimationFrame(update)}
+ (modal?surface:document).addEventListener('scroll',schedule,{passive:true});window.addEventListener('resize',schedule);
+ const content=modal?surface.querySelector('.grid'):$('publications-list');
+ new MutationObserver(schedule).observe(content,{childList:true,subtree:true,characterData:true});new ResizeObserver(schedule).observe(content);
+ if(modal)new MutationObserver(schedule).observe(surface,{attributes:true,attributeFilter:['open']});
+ schedule();
+}
+const configSections=[...$('config-dialog').querySelectorAll('.grid>.stack:first-child>section')];
+configSections.forEach((node,index)=>{node.id='config-section-'+index;node.dataset.positionLabel=['内容来源','处理插件','输出设置'][index];node.classList.add('position-target')});
+positionNavigation(document,()=>[...document.querySelectorAll('.publication-row')]);
+positionNavigation($('config-dialog'),()=>configSections);
+
 loadPublications();
 init();
 </script>
