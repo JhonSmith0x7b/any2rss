@@ -22,7 +22,7 @@ from .chinawriter import _clean_content
 from .configuration import DraftConfig, public_url
 from .rss_input import parse_rss
 
-MAX_BYTES = 5 * 1024 * 1024
+MAX_BYTES = 10 * 1024 * 1024
 MAX_REQUESTS = 500
 
 
@@ -100,7 +100,7 @@ def fetch(url, *, accept='*/*'):
                 chunks.append(chunk)
                 size += len(chunk)
                 if size > MAX_BYTES:
-                    raise ValueError('单个页面超过 5 MiB 限制')
+                    raise ValueError(f'单个页面超过 {MAX_BYTES // (1024 * 1024)} MiB 限制：{url}')
             return b''.join(chunks), url, response.getheader('Content-Type', 'text/html')
         finally:
             connection.close()
@@ -242,7 +242,7 @@ async def _collect(config, limit, progress):
                     await page.wait_for_selector(wait, state='attached', timeout=10000)
                 html = await page.content()
                 if len(html.encode()) > MAX_BYTES:
-                    raise ValueError('浏览器页面超过 5 MiB 限制')
+                    raise ValueError(f'浏览器页面超过 {MAX_BYTES // (1024 * 1024)} MiB 限制：{page.url}')
                 return html, page.url
             data, final_url, _ = await asyncio.to_thread(fetch, url)
             return data, final_url
@@ -257,7 +257,7 @@ async def _collect(config, limit, progress):
                 await page.wait_for_timeout(1500)
                 html, base = await page.content(), page.url
                 if len(html.encode()) > MAX_BYTES:
-                    raise ValueError('浏览器页面超过 5 MiB 限制')
+                    raise ValueError(f'浏览器页面超过 {MAX_BYTES // (1024 * 1024)} MiB 限制：{page.url}')
             else:
                 if list_url in visited:
                     break

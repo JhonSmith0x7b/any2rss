@@ -239,3 +239,32 @@ def test_lazy_images_survive_extraction_and_rss(attrs, expected):
         assert image['src'] == expected
         assert image['alt'] == '插图'
         assert 'data-src' not in image.attrs and 'onerror' not in image.attrs
+
+
+@pytest.mark.parametrize('body_size,succeeds', [(6 * 1024 * 1024, True), (10 * 1024 * 1024, True), (10 * 1024 * 1024 + 1, False)])
+def test_large_page_limit_is_enforced_while_streaming(monkeypatch, body_size, succeeds):
+    remaining = body_size
+    class Response:
+        status = 200
+        def getheader(self, key, default=None): return default
+        def read1(self, size):
+            nonlocal remaining
+            count = min(size, remaining)
+            remaining -= count
+            return b'x' * count
+    closed = []
+    class Connection:
+        def __init__(self, *args, **kwargs): pass
+        def request(self, *args, **kwargs): pass
+        def getresponse(self): return Response()
+        def close(self): closed.append(True)
+    monkeypatch.setattr(execution, 'resolve_public', lambda url: (execution.urlsplit(url), '93.184.216.34', 80))
+    monkeypatch.setattr(socket, 'create_connection', lambda *args, **kwargs: object())
+    monkeypatch.setattr(execution.http.client, 'HTTPConnection', Connection)
+    if succeeds:
+        data, _, _ = execution.fetch('http://example.com/large')
+        assert len(data) == body_size
+    else:
+        with pytest.raises(ValueError, match='10 MiB.*http://example.com/large'):
+            execution.fetch('http://example.com/large')
+    assert closed == [True]
