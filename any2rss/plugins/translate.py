@@ -9,12 +9,24 @@ from bs4 import BeautifulSoup, Comment, NavigableString
 import httpx
 
 
+class TranslationConfigurationError(RuntimeError):
+    """Translation cannot proceed until its provider configuration is fixed."""
+
+
+def redact_translation_secrets(message):
+    for name in ('DEEPSEEK_API_KEY', 'OPENROUTER_API_KEY'):
+        key = os.environ.get(name, '').strip()
+        if key:
+            message = message.replace(key, '[redacted]')
+    return message
+
+
 class TranslationPlugin:
     name = 'llm_translate'
     version = '1'
     batch_chars = 5000
 
-    def __init__(self, target_language='zh-CN', model='deepseek-flash', *, translate_batch=None, batch_cache=None):
+    def __init__(self, target_language='zh-CN', model='qwen/qwen3.7-flash', *, translate_batch=None, batch_cache=None):
         self.target_language = target_language
         self.model = model
         self._translate_batch = translate_batch
@@ -32,12 +44,22 @@ class TranslationPlugin:
         return result
 
     async def _request_batch(self, batch):
-        key = os.environ.get('DEEPSEEK_API_KEY', '').strip()
+        if self.model == 'deepseek-flash':
+            key_name = 'DEEPSEEK_API_KEY'
+            endpoint = 'https://api.deepseek.com/chat/completions'
+            options = {'thinking': {'type': 'disabled'}}
+        elif self.model == 'qwen/qwen3.7-flash':
+            key_name = 'OPENROUTER_API_KEY'
+            endpoint = 'https://openrouter.ai/api/v1/chat/completions'
+            options = {'reasoning': {'enabled': False}, 'provider': {'require_parameters': True}}
+        else:
+            raise TranslationConfigurationError('Unsupported translation model')
+        key = os.environ.get(key_name, '').strip()
         if not key:
-            raise RuntimeError('DEEPSEEK_API_KEY is required for translation')
+            raise TranslationConfigurationError(f'{key_name} is required for translation')
         payload = {
             'model': self.model,
-            'thinking': {'type': 'disabled'},
+            **options,
             'response_format': {'type': 'json_object'},
             'max_tokens': 8192,
             'messages': [
@@ -55,7 +77,7 @@ class TranslationPlugin:
             for attempt in range(3):
                 try:
                     response = await client.post(
-                        'https://api.deepseek.com/chat/completions',
+                        endpoint,
                         headers={'Authorization': f'Bearer {key}'}, json=payload)
                 except httpx.RequestError:
                     if attempt == 2:

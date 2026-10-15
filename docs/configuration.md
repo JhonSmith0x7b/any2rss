@@ -67,7 +67,7 @@ Agent 成功时只返回原始 JSON，不加 Markdown 围栏、表格或前后�
     {
       "name": "llm_translate",
       "enabled": true,
-      "model": "deepseek-flash",
+      "model": "qwen/qwen3.7-flash",
       "target_language": "zh-CN"
     }
   ],
@@ -81,7 +81,7 @@ Agent 成功时只返回原始 JSON，不加 Markdown 围栏、表格或前后�
 ```
 
 以上是完整文档的附加字段片段，需要与 `schema_version` 和 `source` 合并。
-`plugins=[]` 表示不处理。当前只支持一个 `llm_translate` 插件、DeepSeek V4.1 Flash，以及 `zh-CN` / `en` / `ja` 三种目标语言。数组形式为之后按顺序添加插件留出结构。
+`plugins=[]` 表示不处理。当前只支持一个 `llm_translate` 插件、Qwen 3.7 Flash（默认，OpenRouter）或 DeepSeek V4.1 Flash，以及 `zh-CN` / `en` / `ja` 三种目标语言。数组形式为之后按顺序添加插件留出结构。
 
 密钥、Cookie、脚本都不能放进配置。模型密钥继续使用服务器环境配置。未知字段、未知插件、错误类型被拒绝，不静默忽略。
 

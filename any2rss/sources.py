@@ -27,7 +27,7 @@ OUTPUTS = {
         'title': 'Book Marks · 简体中文',
         'language': 'zh-CN',
         'plugins': [
-            {'name': 'llm_translate', 'target_language': 'zh-CN', 'model': 'deepseek-flash'},
+            {'name': 'llm_translate', 'target_language': 'zh-CN', 'model': 'qwen/qwen3.7-flash'},
         ],
     },
 }

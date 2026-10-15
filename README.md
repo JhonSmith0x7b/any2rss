@@ -15,7 +15,7 @@ python3 -m venv .venv
 
 - 网页来源：输入网址和需求，复制提示词交给可访问网页的 Agent，粘贴返回 JSON。支持 HTTP、Playwright、列表分页及正文排除规则。
 - RSS 来源：填入 RSS 2.0 地址即可。
-- 可选 DeepSeek 翻译：在本机 `.env` 设置 `DEEPSEEK_API_KEY`，模型 `deepseek-flash`，语言支持简体中文、英语和日语。密钥不写入订阅 JSON。
+- 可选 AI 翻译：默认 Qwen 3.7 Flash（OpenRouter，`qwen/qwen3.7-flash`），在本机 `.env` 设置 `OPENROUTER_API_KEY`；也可选择 DeepSeek Flash（`deepseek-flash`），使用 `DEEPSEEK_API_KEY`。语言支持简体中文、英语和日语，密钥不写入订阅 JSON。
 - 发布按真实条目上限抓取并执行插件，整轮成功后提供 `/feeds/{id}.xml`；每 3 秒更新页面进度。定时更新由 Web 服务调度，须保持服务运行。
 - 详情中可编辑或删除。编辑保留 RSS 地址，成功后原子切换新内容；失败保留上版 RSS。删除停止调度并关闭 RSS 入口，本机历史记录保留，ID 暂不重复使用。
 - SQLite 默认位于 `data/any2rss.sqlite3`，可用 `ANY2RSS_DB` 更改。翻译缓存持久化，订阅读取不调用模型。

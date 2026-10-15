@@ -184,7 +184,7 @@ class SourceDocument(StrictModel):
 class TranslationConfig(StrictModel):
     name: Literal['llm_translate']
     enabled: bool = True
-    model: Literal['deepseek-flash'] = 'deepseek-flash'
+    model: Literal['deepseek-flash', 'qwen/qwen3.7-flash'] = 'qwen/qwen3.7-flash'
     target_language: Literal['zh-CN', 'en', 'ja'] = 'zh-CN'
 
 

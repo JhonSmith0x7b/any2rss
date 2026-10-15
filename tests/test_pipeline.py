@@ -86,3 +86,26 @@ def test_batch_cache_survives_new_instance(tmp_path, monkeypatch):
     asyncio.run(second.apply(original))
     assert len(calls) == count
     assert original['title'] == 'Original title'
+
+
+def test_qwen_pipeline_continues_after_article_error_without_deepseek_key(tmp_path, monkeypatch):
+    from any2rss.plugins.translate import TranslationPlugin
+    monkeypatch.setenv('ANY2RSS_DB', str(tmp_path / 'qwen.sqlite3'))
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'openrouter-test-secret')
+    calls = []
+
+    async def translate(batch):
+        calls.append(batch)
+        if len(calls) == 1:
+            raise RuntimeError('Invalid article openrouter-test-secret')
+        return {key: '中文' for key in batch}
+
+    plugin = TranslationPlugin(translate_batch=translate)
+    monkeypatch.setattr(pipeline, 'build', lambda _: plugin)
+    storage.save(article(), 'bookmarks')
+    storage.save({**article(), 'guid': 'entry-2', 'url': 'https://example.com/second'}, 'bookmarks')
+    state = asyncio.run(pipeline.process_output('bookmarks-zh'))
+    assert state['saved'] == 1
+    assert len(calls) == 2
+    assert state['errors'][0]['error'] == 'Invalid article [redacted]'

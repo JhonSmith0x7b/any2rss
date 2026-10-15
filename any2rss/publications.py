@@ -9,6 +9,7 @@ from .auth import feed_path
 from .configuration import DraftConfig
 from .sources import FEEDS, SOURCES, OUTPUTS, legacy_enabled
 from .plugins import build
+from .plugins.translate import redact_translation_secrets
 from .pipeline import BatchCache, cache_key
 
 
@@ -260,7 +261,7 @@ async def run_one(identifier):
     except SupersededRun:
         return
     except Exception as error:
-        message = str(error).replace(os.getenv('DEEPSEEK_API_KEY') or '\0', '[redacted]')[:500]
+        message = redact_translation_secrets(str(error))[:500]
         if not message:
             message = '本轮执行超时，请检查站点或翻译服务。' if isinstance(error, asyncio.TimeoutError) else type(error).__name__
         with storage.connect() as db:

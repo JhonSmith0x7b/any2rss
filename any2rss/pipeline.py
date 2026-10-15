@@ -2,9 +2,9 @@
 import hashlib
 import json
 import logging
-import os
 from . import storage
 from .plugins import build
+from .plugins.translate import TranslationConfigurationError, redact_translation_secrets
 from .sources import OUTPUTS
 
 log = logging.getLogger('any2rss')
@@ -63,10 +63,10 @@ async def process_output(output, limit=50):
                 log.info('%s: processed article %s/%s', output, state['saved'], len(articles))
             except Exception as exc:
                 # Never expose provider response bodies or credentials in logs/status.
-                message = str(exc).replace(os.environ.get('DEEPSEEK_API_KEY') or '\0', '[redacted]')[:200]
+                message = redact_translation_secrets(str(exc))[:200]
                 state['errors'].append({'url': article['url'], 'error': message})
                 log.warning('%s: article translation failed (%s)', output, type(exc).__name__)
-                if '401' in message or '402' in message or not os.environ.get('DEEPSEEK_API_KEY'):
+                if '401' in message or '402' in message or isinstance(exc, TranslationConfigurationError):
                     break
             storage.save_state(state, output)
     except Exception as exc:

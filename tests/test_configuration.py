@@ -96,3 +96,16 @@ def test_author_and_date_cannot_be_html():
         data = draft()
         data['source']['article'][field] = {'selector': 'div', 'read': 'html'}
         assert client.post('/api/config/validate', json=data).status_code == 422
+
+
+def test_translation_model_selection_and_default():
+    data = draft('rss')
+    data['plugins'] = [{'name': 'llm_translate'}]
+    response = client.post('/api/config/validate', json=data)
+    assert response.status_code == 200
+    assert response.json()['config']['plugins'][0]['model'] == 'qwen/qwen3.7-flash'
+    for model in ('qwen/qwen3.7-flash', 'deepseek-flash'):
+        data['plugins'][0]['model'] = model
+        assert client.post('/api/config/validate', json=data).status_code == 200
+    data['plugins'][0]['model'] = 'unknown-model'
+    assert client.post('/api/config/validate', json=data).status_code == 422

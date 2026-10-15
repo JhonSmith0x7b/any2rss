@@ -32,8 +32,8 @@ def test_translates_text_without_modifying_html_or_original():
     assert not soup.find('b')
     assert len(batches[0]) == 4
     assert article == original
-    assert result['translation']['model'] == 'deepseek-flash'
-    assert plugin.cache_config == dict(model='deepseek-flash', target_language='zh-CN', version='1')
+    assert result['translation']['model'] == 'qwen/qwen3.7-flash'
+    assert plugin.cache_config == dict(model='qwen/qwen3.7-flash', target_language='zh-CN', version='1')
 
 
 def test_long_node_split_and_successful_batches_cached_after_failure():
@@ -80,18 +80,29 @@ def test_invalid_identifiers_or_values_rejected(response):
 def mock_http(monkeypatch, handler):
     original_client = httpx.AsyncClient
     monkeypatch.setenv('DEEPSEEK_API_KEY', 'secret-test-value')
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'openrouter-test-value')
     monkeypatch.setattr('any2rss.plugins.translate.httpx.AsyncClient',
                         lambda **kwargs: original_client(transport=httpx.MockTransport(handler), **kwargs))
 
 
-def test_http_payload_and_usage(monkeypatch):
+@pytest.mark.parametrize('model', ['deepseek-flash', 'qwen/qwen3.7-flash'])
+def test_http_payload_and_usage(monkeypatch, model):
     import json
 
     def handler(request):
         payload = json.loads(request.content)
-        assert str(request.url) == 'https://api.deepseek.com/chat/completions'
-        assert payload['model'] == 'deepseek-flash'
-        assert payload['thinking'] == {'type': 'disabled'}
+        assert payload['model'] == model
+        if model == 'deepseek-flash':
+            assert str(request.url) == 'https://api.deepseek.com/chat/completions'
+            assert request.headers['Authorization'] == 'Bearer secret-test-value'
+            assert payload['thinking'] == {'type': 'disabled'}
+            assert 'reasoning' not in payload
+        else:
+            assert str(request.url) == 'https://openrouter.ai/api/v1/chat/completions'
+            assert request.headers['Authorization'] == 'Bearer openrouter-test-value'
+            assert payload['reasoning'] == {'enabled': False}
+            assert payload['provider'] == {'require_parameters': True}
+            assert 'thinking' not in payload
         assert payload['max_tokens'] == 8192
         assert payload['response_format'] == {'type': 'json_object'}
         return httpx.Response(200, json={
@@ -99,7 +110,9 @@ def test_http_payload_and_usage(monkeypatch):
             'usage': {'prompt_tokens': 20, 'completion_tokens': 4, 'total_tokens': 24}})
 
     mock_http(monkeypatch, handler)
-    result = asyncio.run(TranslationPlugin().apply({'title': 'Hello'}))
+    if model == 'qwen/qwen3.7-flash':
+        monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+    result = asyncio.run(TranslationPlugin(model=model).apply({'title': 'Hello'}))
     assert result['title'] == '你好'
     assert result['translation']['usage']['total_tokens'] == 24
 
@@ -189,3 +202,35 @@ def test_injected_empty_batch_cache_reused_across_instances():
     second = TranslationPlugin(translate_batch=translate, batch_cache=cache)
     assert asyncio.run(second.apply(article)) == result
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('model,key_name', [
+    ('deepseek-flash', 'DEEPSEEK_API_KEY'),
+    ('qwen/qwen3.7-flash', 'OPENROUTER_API_KEY'),
+])
+def test_missing_provider_key_names_correct_setting(monkeypatch, model, key_name):
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'deepseek-test')
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'openrouter-test')
+    monkeypatch.setenv(key_name, '   ')
+    with pytest.raises(RuntimeError, match=f'{key_name} is required'):
+        asyncio.run(TranslationPlugin(model=model).apply({'title': 'Hello'}))
+
+
+def test_model_change_does_not_reuse_other_provider_batch_cache():
+    cache, calls = {}, []
+
+    async def translate(batch):
+        calls.append(batch)
+        return {key: '中文' for key in batch}
+
+    for model in ('deepseek-flash', 'qwen/qwen3.7-flash'):
+        asyncio.run(TranslationPlugin(model=model, translate_batch=translate,
+                                     batch_cache=cache).apply({'title': 'Hello'}))
+    assert len(calls) == 2
+
+
+def test_redacts_both_provider_keys(monkeypatch):
+    from any2rss.plugins.translate import redact_translation_secrets
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'deepseek-test')
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'openrouter-test')
+    assert redact_translation_secrets('deepseek-test openrouter-test') == '[redacted] [redacted]'
