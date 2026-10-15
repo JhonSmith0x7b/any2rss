@@ -73,7 +73,7 @@ def test_invalid_identifiers_or_values_rejected(response):
     async def translate(batch):
         return response
 
-    with pytest.raises(RuntimeError, match='identifiers or values'):
+    with pytest.raises(RuntimeError, match='identifier_mismatch|empty_value|nonstring_value'):
         asyncio.run(TranslationPlugin(translate_batch=translate).apply({'title': 'Hello'}))
 
 
@@ -160,8 +160,11 @@ def test_truncated_response_rejected(monkeypatch):
     monkeypatch.setattr('any2rss.plugins.translate.asyncio.sleep', sleep)
     mock_http(monkeypatch, lambda request: httpx.Response(200, json={
         'choices': [{'finish_reason': 'length', 'message': {'content': '{"t0_0": "你好"}'}}]}))
+    events = []
     with pytest.raises(RuntimeError, match='invalid or incomplete'):
-        asyncio.run(TranslationPlugin().apply({'title': 'Hello'}))
+        asyncio.run(TranslationPlugin(progress=events.append).apply({'title': 'Hello'}))
+    assert events[-1]['batch_status'] == 'responded'
+    assert events[-1]['last_response_at']
 
 
 @pytest.mark.parametrize('invalid', [
@@ -169,23 +172,29 @@ def test_truncated_response_rejected(monkeypatch):
     {'finish_reason': 'stop', 'message': {'content': '{"wrong": "你好"}'}},
     {'finish_reason': 'stop', 'message': {'content': 'not json'}},
 ])
-def test_invalid_response_retried_then_succeeds(monkeypatch, invalid):
-    calls, sleeps = [], []
-
-    async def sleep(delay):
-        sleeps.append(delay)
+def test_invalid_response_split_then_succeeds_and_accounts_failed_usage(monkeypatch, invalid):
+    import json
+    calls = []
 
     def handler(request):
-        calls.append(request)
+        payload = json.loads(request.content)
+        batch = json.loads(payload['messages'][1]['content'])
+        calls.append(batch)
         choice = invalid if len(calls) == 1 else {
-            'finish_reason': 'stop', 'message': {'content': '{"t0_0": "你好"}'}}
-        return httpx.Response(200, json={'choices': [choice]})
+            'finish_reason': 'stop', 'message': {'content': json.dumps(
+                {key: value.upper() for key, value in batch.items()})}}
+        return httpx.Response(200, json={'choices': [choice], 'usage': {'total_tokens': 10}})
 
-    monkeypatch.setattr('any2rss.plugins.translate.asyncio.sleep', sleep)
     mock_http(monkeypatch, handler)
-    assert asyncio.run(TranslationPlugin().apply({'title': 'Hello'}))['title'] == '你好'
-    assert len(calls) == 2
-    assert sleeps == [1]
+    events = []
+    result = asyncio.run(TranslationPlugin(progress=events.append).apply(
+        {'title': 'Hello', 'summary': 'World'}))
+    assert result['title'] == 'HELLO'
+    assert len(calls) == 3
+    assert calls[1] != calls[0] and calls[2] != calls[0]
+    assert result['translation']['usage']['total_tokens'] == 30
+    assert 'splitting' in [event['batch_status'] for event in events]
+    assert events[-1]['last_response_at']
 
 
 def test_injected_empty_batch_cache_reused_across_instances():
@@ -234,3 +243,97 @@ def test_redacts_both_provider_keys(monkeypatch):
     monkeypatch.setenv('DEEPSEEK_API_KEY', 'deepseek-test')
     monkeypatch.setenv('OPENROUTER_API_KEY', 'openrouter-test')
     assert redact_translation_secrets('deepseek-test openrouter-test') == '[redacted] [redacted]'
+
+
+def test_split_children_cached_across_failure_and_new_instance():
+    from any2rss.plugins.translate import TranslationResponseError
+    cache, calls = {}, []
+    fail = True
+
+    async def translate(batch):
+        calls.append(dict(batch))
+        if len(batch) > 1:
+            return {}
+        if 't1_0' in batch and fail:
+            raise TranslationResponseError('empty_value')
+        return {key: value.upper() for key, value in batch.items()}
+
+    article = {'title': 'Hello', 'summary': 'world'}
+    with pytest.raises(TranslationResponseError):
+        asyncio.run(TranslationPlugin(translate_batch=translate, batch_cache=cache).apply(article))
+    fail = False
+    result = asyncio.run(TranslationPlugin(translate_batch=translate, batch_cache=cache).apply(article))
+    assert result['summary'] == 'WORLD'
+    assert sum(call == {'t0_0': 'Hello'} for call in calls) == 1
+
+
+def test_single_node_splitting_preserves_text_and_whitespace():
+    calls = []
+
+    async def translate(batch):
+        calls.append(batch)
+        if max(map(len, batch.values())) > 100:
+            return {}
+        return {key: value.upper() for key, value in batch.items()}
+
+    title = 'a' * 99 + '  ' + 'b' * 99
+    result = asyncio.run(TranslationPlugin(translate_batch=translate).apply({'title': title}))
+    assert result['title'] == title.upper()
+    assert len(calls) == 3
+
+
+def test_split_recovery_request_budget_and_depth_are_bounded():
+    from any2rss.plugins.translate import TranslationResponseError
+    calls = []
+
+    async def translate(batch):
+        calls.append(batch)
+        return {}
+
+    plugin = TranslationPlugin(translate_batch=translate)
+    plugin.max_batch_requests = 2
+    with pytest.raises(TranslationResponseError, match='request_budget_exhausted'):
+        asyncio.run(plugin.apply({'title': 'a' * 5000}))
+    assert len(calls) == 2
+    calls.clear()
+    plugin.max_batch_requests = 15
+    plugin.max_split_depth = 1
+    with pytest.raises(TranslationResponseError, match='identifier_mismatch'):
+        asyncio.run(plugin.apply({'title': 'a' * 5000}))
+    assert len(calls) == 2
+
+
+def test_progress_callback_exception_is_not_recovered():
+    from any2rss.plugins.translate import TranslationResponseError
+    failure = TranslationResponseError('business_callback')
+    calls = []
+
+    def progress(event):
+        raise failure
+
+    async def translate(batch):
+        calls.append(batch)
+        return batch
+
+    with pytest.raises(TranslationResponseError) as exc:
+        asyncio.run(TranslationPlugin(progress=progress, translate_batch=translate).apply(
+            {'title': 'a' * 5000}))
+    assert exc.value is failure
+    assert not calls
+
+
+def test_failure_diagnostics_do_not_log_response_text_or_keys(monkeypatch, caplog):
+    import json
+    from any2rss.plugins.translate import TranslationResponseError
+    private = 'private source and model text'
+    mock_http(monkeypatch, lambda request: httpx.Response(200, json={
+        'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps({private: private})}}],
+        'usage': {'total_tokens': 12}}))
+    with pytest.raises(TranslationResponseError, match='identifier_mismatch') as exc:
+        asyncio.run(TranslationPlugin().apply({'title': private}))
+    assert private not in caplog.text
+    assert private not in str(exc.value)
+    assert 'openrouter-test-value' not in caplog.text
+    assert 'item_count=1' in caplog.text
+    assert 'extra_count' in caplog.text
+    assert 'total_tokens' in caplog.text

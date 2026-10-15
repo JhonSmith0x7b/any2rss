@@ -18,6 +18,7 @@ python3 -m venv .venv
 - 可选 AI 翻译：默认 Qwen 3.7 Flash（OpenRouter，`qwen/qwen3.7-flash`），在本机 `.env` 设置 `OPENROUTER_API_KEY`；也可选择 DeepSeek Flash（`deepseek-flash`），使用 `DEEPSEEK_API_KEY`。语言支持简体中文、英语和日语，密钥不写入订阅 JSON。
 - 发布按真实条目上限抓取并执行插件，整轮成功后提供 `/feeds/{id}.xml`；每 3 秒更新页面进度。定时更新由 Web 服务调度，须保持服务运行。
 - 详情中可编辑或删除。编辑保留 RSS 地址，成功后原子切换新内容；失败保留上版 RSS。删除停止调度并关闭 RSS 入口，本机历史记录保留，ID 暂不重复使用。
+- 后台最多同时处理 2 个订阅；翻译显示文章、批次、重试与最近响应时间。格式错误会在请求预算内拆小批次恢复，单篇失败后继续处理其余文章并补试一次；仍有失败则保留旧版 RSS，已成功的翻译缓存留待下轮复用。
 - SQLite 默认位于 `data/any2rss.sqlite3`，可用 `ANY2RSS_DB` 更改。翻译缓存持久化，订阅读取不调用模型。
 
 三个早期内置示例已停用，不再列出、提供 RSS 或后台采集。旧历史数据及解析代码保留；不需要启动旧 `any2rss.worker`。

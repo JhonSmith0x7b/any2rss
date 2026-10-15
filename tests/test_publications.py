@@ -401,3 +401,126 @@ def test_retired_examples_are_not_exposed_or_scheduled(client):
         assert client.get('/api/config-preview/'+identifier).status_code == 404
     assert storage.status('bookmarks')['articles'] == 1
     asyncio.run(worker.run(None))  # Disabled worker returns before reading arguments or fetching.
+
+
+def test_failed_article_retried_after_others_without_repeating_success(client, monkeypatch):
+    items = [article(str(index)) for index in range(3)]
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=items))
+    plugin = type('Plugin', (), {'name': 'test', 'cache_config': {}})()
+    calls = []
+    async def apply(value):
+        calls.append(value['guid'])
+        if value['guid'] == '0' and calls.count('0') == 1:
+            raise RuntimeError('invalid response')
+        return {**value, 'title': 'Translated ' + value['guid']}
+    plugin.apply = apply
+    monkeypatch.setattr(publications, 'build', lambda _: plugin)
+    publish(client, draft(plugins=[{'name': 'llm_translate', 'enabled': True}]))
+    asyncio.run(publications.run_one('my-books'))
+    assert calls == ['0', '1', '2', '0']
+    assert publications.get('my-books')['status'] == 'published'
+    assert storage.status('my-books')['articles'] == 3
+
+
+def test_permanent_article_failure_retains_feed_and_success_cache(client, monkeypatch):
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[article('old')]))
+    publish(client)
+    asyncio.run(publications.run_one('my-books'))
+    original = client.get('/feeds/my-books.xml').content
+    publications.edit('my-books', DraftConfig.model_validate(draft(plugins=[{'name': 'llm_translate', 'enabled': True}])))
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[article('bad'), article('good')]))
+    plugin = type('Plugin', (), {'name': 'test', 'cache_config': {}})()
+    calls = []
+    async def apply(value):
+        calls.append(value['guid'])
+        if value['guid'] == 'bad':
+            raise RuntimeError('invalid response')
+        return value
+    plugin.apply = apply
+    monkeypatch.setattr(publications, 'build', lambda _: plugin)
+    asyncio.run(publications.run_one('my-books'))
+    assert calls == ['bad', 'good', 'bad']
+    state = publications.get('my-books')
+    assert state['status'] == 'failed'
+    assert state['progress']['failed_articles'] == 1
+    assert state['progress']['retrying_articles'] is False
+    assert client.get('/feeds/my-books.xml').content == original
+    asyncio.run(publications.run_one('my-books'))
+    assert calls == ['bad', 'good', 'bad', 'bad', 'bad']
+
+
+def test_configuration_failure_stops_without_trying_other_articles(client, monkeypatch):
+    from any2rss.plugins.translate import TranslationConfigurationError
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[article('1'), article('2')]))
+    plugin = type('Plugin', (), {'name': 'test', 'cache_config': {}})()
+    plugin.apply = AsyncMock(side_effect=TranslationConfigurationError('HTTP 401'))
+    monkeypatch.setattr(publications, 'build', lambda _: plugin)
+    publish(client, draft(plugins=[{'name': 'llm_translate', 'enabled': True}]))
+    asyncio.run(publications.run_one('my-books'))
+    plugin.apply.assert_awaited_once()
+    assert publications.get('my-books')['error'] == 'HTTP 401'
+
+
+def test_batch_progress_preserves_last_real_response(client, monkeypatch):
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[article('1'), article('2')]))
+    def build(options):
+        plugin = type('Plugin', (), {'name': 'test', 'cache_config': {}})()
+        async def apply(value):
+            if value['guid'] == '1':
+                options['progress']({'batch_current': 1, 'batch_total': 2,
+                                     'batch_status': 'completed', 'last_response_at': '2026-10-15T01:00:00+00:00'})
+            else:
+                options['progress']({'batch_current': 1, 'batch_total': 1,
+                                     'batch_status': 'cached', 'last_response_at': None})
+                progress = storage.status('my-books')['progress']
+                assert progress['last_response_at'] == '2026-10-15T01:00:00+00:00'
+                assert progress['article_current'] == 2
+                assert progress['batch_status'] == 'cached'
+            return value
+        plugin.apply = apply
+        return plugin
+    monkeypatch.setattr(publications, 'build', build)
+    publish(client, draft(plugins=[{'name': 'llm_translate', 'enabled': True}]))
+    asyncio.run(publications.run_one('my-books'))
+    assert publications.get('my-books')['status'] == 'published'
+
+
+def test_scheduler_refills_two_slots_and_cancels_before_unlock(client, monkeypatch):
+    import fcntl
+    import os
+    for identifier in ['slow', 'fast', 'next']:
+        publications.reserve(DraftConfig.model_validate(draft(identifier)))
+    async def scenario():
+        started = []
+        cleaned = []
+        next_started = asyncio.Event()
+        gate = asyncio.Event()
+        async def run(identifier):
+            assert identifier not in started
+            started.append(identifier)
+            if identifier == 'fast':
+                with storage.connect() as db:
+                    db.execute('UPDATE publications SET next_run=? WHERE id=?', (publications.time.time() + 1000, identifier))
+                return
+            if identifier == 'next':
+                next_started.set()
+            try:
+                await gate.wait()
+            finally:
+                # A second scheduler must not acquire the lock while cleanup runs.
+                with open(os.environ['ANY2RSS_DB'] + '.publications.lock', 'a') as lock:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                await asyncio.sleep(0)
+                cleaned.append(identifier)
+        monkeypatch.setattr(publications, 'run_one', run)
+        task = asyncio.create_task(publications.scheduler())
+        await asyncio.wait_for(next_started.wait(), timeout=1)
+        assert started == ['slow', 'fast', 'next']
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert set(cleaned) == {'slow', 'next'}
+        with open(os.environ['ANY2RSS_DB'] + '.publications.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    asyncio.run(scenario())

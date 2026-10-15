@@ -9,7 +9,7 @@ from .auth import feed_path
 from .configuration import DraftConfig
 from .sources import FEEDS, SOURCES, OUTPUTS, legacy_enabled
 from .plugins import build
-from .plugins.translate import redact_translation_secrets
+from .plugins.translate import TranslationConfigurationError, redact_translation_secrets
 from .pipeline import BatchCache, cache_key
 
 
@@ -198,12 +198,17 @@ async def run_one(identifier):
         with storage.connect() as db:
             check_run(db, identifier, revision)
 
-    def report(phase, completed=0, total=None):
+    progress_details = {}
+    article_errors = {}
+
+    def report(phase, completed=0, total=None, **details):
+        progress_details.update(details)
         with storage.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             check_run(db, identifier, revision)
             state = {'progress': {'phase': phase, 'completed': completed, 'total': total,
-                                  'updated_at': storage.now()}}
+                                  'updated_at': storage.now(), **progress_details},
+                     'errors': list(article_errors.values())}
             db.execute('INSERT INTO source_states VALUES (?,?) ON CONFLICT(source) DO UPDATE SET data=excluded.data',
                        (identifier, json.dumps(state)))
     try:
@@ -215,13 +220,30 @@ async def run_one(identifier):
             ensure_current()
             if not items:
                 raise ValueError('没有提取到文章，请检查列表选择器或 RSS 内容。')
-            plugins = [build({**p.model_dump(exclude={'enabled'}), 'batch_cache': BatchCache()})
+            results = {}
+            phase = 'translating' if any(p.enabled for p in config.plugins) else 'processing'
+            current_article = 0
+            retrying = False
+
+            def batch_progress(details):
+                # Cached batches do not represent a new provider response.
+                details = {key: value for key, value in details.items() if value is not None}
+                report(phase, len(results), len(items), article_current=current_article,
+                       failed_articles=len(article_errors), retrying_articles=retrying, **details)
+
+            plugins = [build({**p.model_dump(exclude={'enabled'}), 'batch_cache': BatchCache(),
+                              'progress': batch_progress})
                        for p in config.plugins if p.enabled]
-            results = []
-            phase = 'translating' if plugins else 'processing'
-            report(phase, 0, len(items))
-            for article in items:
+            report(phase, 0, len(items), failed_articles=0, retrying_articles=False)
+
+            async def process(index):
+                nonlocal current_article
+                current_article = index + 1
+                article = items[index]
                 ensure_current()
+                report(phase, len(results), len(items), article_current=current_article,
+                       failed_articles=len(article_errors), retrying_articles=retrying,
+                       batch_current=None, batch_total=None, batch_status=None, attempt=None)
                 if article.get('published_at_inferred'):
                     with storage.connect() as db:
                         row = db.execute('SELECT data FROM syndicated_articles WHERE source=? AND identity=?',
@@ -229,17 +251,36 @@ async def run_one(identifier):
                     if row:
                         article['published_at'] = json.loads(row[0])['published_at']
                 result = article
-                for plugin in plugins:
-                    ensure_current()
-                    key = cache_key(result, plugin)
-                    cached = storage.cached_plugin(key)
-                    if cached is None:
-                        cached = await plugin.apply(result)
+                try:
+                    for plugin in plugins:
                         ensure_current()
-                        storage.save_plugin_cache(key, cached)
-                    result = cached
-                results.append(result)
-                report(phase, len(results), len(items))
+                        key = cache_key(result, plugin)
+                        cached = storage.cached_plugin(key)
+                        if cached is None:
+                            cached = await plugin.apply(result)
+                            ensure_current()
+                            storage.save_plugin_cache(key, cached)
+                        result = cached
+                except (SupersededRun, TranslationConfigurationError):
+                    raise
+                except Exception as error:
+                    article_errors[index] = {'article': index + 1,
+                                             'error': redact_translation_secrets(str(error))[:500] or type(error).__name__}
+                else:
+                    results[index] = result
+                    article_errors.pop(index, None)
+                report(phase, len(results), len(items), failed_articles=len(article_errors),
+                       retrying_articles=retrying)
+
+            for index in range(len(items)):
+                await process(index)
+            retrying = True
+            for index in list(article_errors):
+                await process(index)
+            report(phase, len(results), len(items), failed_articles=len(article_errors), retrying_articles=False)
+            if article_errors:
+                raise RuntimeError(f'本轮有 {len(article_errors)} 篇文章翻译失败，已保留旧版 RSS。')
+            results = [results[index] for index in range(len(items))]
             return results
         results = await asyncio.wait_for(produce(), timeout=1800)
         report('publishing', len(results), len(results))
@@ -283,9 +324,27 @@ async def scheduler():
         with storage.connect() as db:
             initialize(db)
             db.execute("UPDATE publications SET status='pending' WHERE status='running'")
-        while True:
-            with storage.connect() as db:
-                ids = [r[0] for r in db.execute("SELECT id FROM publications WHERE status IN ('pending','published','failed') AND next_run<=? ORDER BY next_run LIMIT 10", (time.time(),))]
-            for identifier in ids:
-                await run_one(identifier)
-            await asyncio.sleep(2)
+        active = {}
+        try:
+            while True:
+                with storage.connect() as db:
+                    ids = [r[0] for r in db.execute("SELECT id FROM publications WHERE status IN ('pending','published','failed') AND next_run<=? ORDER BY next_run LIMIT 10", (time.time(),))]
+                for identifier in ids:
+                    if len(active) >= 2:
+                        break
+                    if identifier not in active:
+                        active[identifier] = asyncio.create_task(run_one(identifier))
+                if active:
+                    done, _ = await asyncio.wait(active.values(), timeout=2,
+                                                 return_when=asyncio.FIRST_COMPLETED)
+                    for identifier, task in list(active.items()):
+                        if task in done:
+                            del active[identifier]
+                            task.result()
+                if not active:
+                    await asyncio.sleep(2)
+        finally:
+            # Hold the cross-worker lock until every in-flight request is stopped.
+            for task in active.values():
+                task.cancel()
+            await asyncio.gather(*active.values(), return_exceptions=True)
