@@ -104,3 +104,26 @@ def test_normal_widget_preserves_link_text_and_image_through_cleaning():
 def test_unsafe_or_unknown_widgets_fail(data):
     with pytest.raises(ValueError):
         render_body(payload([atomic(0)], {'0': {'type': 'WIDGET', 'data': data}}))
+
+
+@pytest.mark.parametrize('caption', ['', '游戏详情<script>'])
+def test_embed_url_preserved_through_cleaning(caption):
+    from any2rss.chinawriter import _clean_content
+    url = 'https://store.steampowered.com/app/3781790/ETERNAL_ANIMA/?l=schinese&x=1'
+    html = render_body(payload([{'text': 'Before'}, atomic(0), {'text': 'After'}], {
+        '0': {'type': 'EMBED', 'data': {'content': url, 'caption': caption}},
+    }))
+    cleaned = BeautifulSoup(_clean_content(BeautifulSoup(html, 'html.parser'),
+                                          'https://www.gcores.com/articles/220966'), 'html.parser')
+    assert cleaned.a['href'] == url
+    assert cleaned.a.text == (caption or url)
+    assert not cleaned.script
+    assert cleaned.get_text().startswith('Before') and cleaned.get_text().endswith('After')
+
+
+@pytest.mark.parametrize('content', [None, '', {}, 'javascript:alert(1)',
+                                    '<iframe src="https://example.com"></iframe>',
+                                    'https://user:password@example.com/', 'https://example.com/\nx'])
+def test_invalid_embed_content_rejected(content):
+    with pytest.raises(ValueError):
+        render_body(payload([atomic(0)], {'0': {'type': 'EMBED', 'data': {'content': content}}}))

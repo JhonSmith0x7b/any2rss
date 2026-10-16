@@ -34,6 +34,13 @@ def _atomic(entity: dict) -> str:
     kind, data = entity.get("type"), entity.get("data", {})
     if kind == "IMAGE":
         return _figure(data)
+    if kind == "EMBED":
+        # URL embeds (e.g. Steam cards) remain useful without executable HTML.
+        url = _url(data.get("content"))
+        caption = data.get("caption") or ""
+        if not isinstance(caption, str):
+            raise ValueError("机核嵌入内容图注格式无效")
+        return f'<p><a href="{url}">{escape(caption or data["content"])}</a></p>'
     if kind == "GALLERY":
         images = data.get("images")
         if not isinstance(images, list) or not images:
