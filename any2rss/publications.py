@@ -15,6 +15,7 @@ from .pipeline import BatchCache, cache_key
 
 def initialize(db):
     db.execute('CREATE TABLE IF NOT EXISTS publications (id TEXT PRIMARY KEY, config TEXT NOT NULL, status TEXT NOT NULL, error TEXT, next_run REAL NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)')
+    db.execute('CREATE TABLE IF NOT EXISTS publication_pending (source TEXT NOT NULL, revision INTEGER NOT NULL, url TEXT NOT NULL, data TEXT, error TEXT, done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source, revision, url))')
     columns = {row[1] for row in db.execute('PRAGMA table_info(publications)')}
     if not {'revision', 'published_revision', 'published_config'} <= columns:
         # Serialize the one-time migration across simultaneous API requests/workers.
@@ -31,6 +32,7 @@ def initialize(db):
 
 
 def clear_progress(db, identifier):
+    db.execute('DELETE FROM publication_pending WHERE source=?', (identifier,))
     db.execute('DELETE FROM source_states WHERE source=?', (identifier,))
 
 
@@ -189,7 +191,7 @@ async def run_one(identifier):
         return
     config, revision = value['config'], value['revision']
     with storage.connect() as db:
-        claimed = db.execute("UPDATE publications SET status='running',error=NULL WHERE id=? AND revision=? AND status IN ('pending','published','failed')",
+        claimed = db.execute("UPDATE publications SET status='running',error=NULL WHERE id=? AND revision=? AND status IN ('pending','published','partial','failed')",
                              (identifier, revision)).rowcount
     if not claimed:
         return
@@ -200,56 +202,137 @@ async def run_one(identifier):
 
     progress_details = {}
     article_errors = {}
+    saved = {}
+    collected = {}
+    collection_error = None
+    translating = any(p.enabled for p in config.plugins)
+
+    def pending(db):
+        return db.execute('SELECT url,data,error FROM publication_pending WHERE source=? AND revision=? AND done=0 ORDER BY rowid',
+                          (identifier, revision)).fetchall()
 
     def report(phase, completed=0, total=None, **details):
         progress_details.update(details)
         with storage.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             check_run(db, identifier, revision)
+            remaining = pending(db)
             state = {'progress': {'phase': phase, 'completed': completed, 'total': total,
-                                  'updated_at': storage.now(), **progress_details},
-                     'errors': list(article_errors.values())}
+                                  'updated_at': storage.now(), **progress_details,
+                                  'saved_articles': len(saved), 'pending_articles': len(remaining)},
+                     'errors': [{'url': url, 'error': error} for url, _, error in remaining if error]}
             db.execute('INSERT INTO source_states VALUES (?,?) ON CONFLICT(source) DO UPDATE SET data=excluded.data',
                        (identifier, json.dumps(state)))
+
+    def discover(urls):
+        with storage.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            check_run(db, identifier, revision)
+            db.executemany('INSERT OR IGNORE INTO publication_pending (source,revision,url) VALUES (?,?,?)',
+                           [(identifier, revision, url) for url in urls])
+
+    def save_result(article, url):
+        with storage.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            check_run(db, identifier, revision)
+            identity = article.get('guid') or article['url']
+            db.execute('INSERT INTO syndicated_articles VALUES (?,?,?,?) ON CONFLICT(source,identity) DO UPDATE SET published_at=excluded.published_at,data=excluded.data',
+                       (identifier, identity, article['published_at'], json.dumps(article, ensure_ascii=False)))
+            previous = db.execute('SELECT published_revision FROM publications WHERE id=?', (identifier,)).fetchone()[0]
+            if previous != revision:
+                # Keep receipts until the new configuration completes. A partial
+                # revision merges successes without removing older feed entries.
+                db.execute('INSERT INTO publication_pending VALUES (?,?,?,?,NULL,1) ON CONFLICT(source,revision,url) DO UPDATE SET data=excluded.data,error=NULL,done=1',
+                           (identifier, revision, url, json.dumps(article)))
+            else:
+                db.execute('DELETE FROM publication_pending WHERE source=? AND revision=? AND url=?', (identifier, revision, url))
+            db.execute('UPDATE publications SET published_config=? WHERE id=?', (config.model_dump_json(), identifier))
+        saved[identity] = article
+
+    def receive(article, url):
+        ensure_current()
+        if article.get('published_at_inferred'):
+            with storage.connect() as db:
+                row = db.execute('SELECT data FROM syndicated_articles WHERE source=? AND identity=?',
+                                 (identifier, article.get('guid') or article['url'])).fetchone()
+            if row:
+                article['published_at'] = json.loads(row[0])['published_at']
+        collected[url] = article
+        if translating:
+            with storage.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                check_run(db, identifier, revision)
+                db.execute('INSERT INTO publication_pending VALUES (?,?,?,?,NULL,0) ON CONFLICT(source,revision,url) DO UPDATE SET data=excluded.data,error=NULL,done=0',
+                           (identifier, revision, url, json.dumps(article)))
+        else:
+            save_result(article, url)
+
+    def failed(url, error):
+        nonlocal collection_error
+        if url == config.source.url:
+            collection_error = error
+        message = redact_translation_secrets(str(error))[:500] or type(error).__name__
+        with storage.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            check_run(db, identifier, revision)
+            db.execute('UPDATE publication_pending SET error=? WHERE source=? AND revision=? AND url=? AND done=0',
+                       (message, identifier, revision, url))
+
     try:
         report('discovering')
-        limit = config.output.item_limit
+        with storage.connect() as db:
+            queued = pending(db)
+        # Raw articles survive interrupted translations; only missing bodies need fetching.
+        for url, data, _ in queued:
+            if data:
+                collected[url] = json.loads(data)
+        retry_urls = [url for url, data, _ in queued if not data]
+
         async def produce():
+            nonlocal collection_error
             ensure_current()
-            items = await collect(config, limit, progress=report)
+            try:
+                items = await collect(config, config.output.item_limit, progress=report,
+                                      on_article=receive, on_discovered=discover, on_error=failed,
+                                      retry_urls=retry_urls)
+                # Also support collectors returning complete RSS batches.
+                for article in items:
+                    if not any(item is article for item in collected.values()):
+                        receive(article, article['url'])
+            except SupersededRun:
+                raise
+            except Exception as error:
+                collection_error = error
             ensure_current()
-            if not items:
-                raise ValueError('没有提取到文章，请检查列表选择器或 RSS 内容。')
-            results = {}
-            phase = 'translating' if any(p.enabled for p in config.plugins) else 'processing'
+            if not collected:
+                if collection_error:
+                    raise collection_error
+                with storage.connect() as db:
+                    remaining = pending(db)
+                if not remaining:
+                    raise ValueError('没有提取到文章，请检查列表选择器或 RSS 内容。')
+            if not translating:
+                return
+            items = list(collected.items())
             current_article = 0
             retrying = False
 
             def batch_progress(details):
-                # Cached batches do not represent a new provider response.
                 details = {key: value for key, value in details.items() if value is not None}
-                report(phase, len(results), len(items), article_current=current_article,
+                report('translating', len(saved), len(items), article_current=current_article,
                        failed_articles=len(article_errors), retrying_articles=retrying, **details)
 
             plugins = [build({**p.model_dump(exclude={'enabled'}), 'batch_cache': BatchCache(),
-                              'progress': batch_progress})
-                       for p in config.plugins if p.enabled]
-            report(phase, 0, len(items), failed_articles=0, retrying_articles=False)
+                              'progress': batch_progress}) for p in config.plugins if p.enabled]
 
             async def process(index):
                 nonlocal current_article
                 current_article = index + 1
-                article = items[index]
+                url, article = items[index]
                 ensure_current()
-                report(phase, len(results), len(items), article_current=current_article,
+                report('translating', len(saved), len(items), article_current=current_article,
                        failed_articles=len(article_errors), retrying_articles=retrying,
                        batch_current=None, batch_total=None, batch_status=None, attempt=None)
-                if article.get('published_at_inferred'):
-                    with storage.connect() as db:
-                        row = db.execute('SELECT data FROM syndicated_articles WHERE source=? AND identity=?',
-                                         (identifier, article.get('guid') or article['url'])).fetchone()
-                    if row:
-                        article['published_at'] = json.loads(row[0])['published_at']
                 result = article
                 try:
                     for plugin in plugins:
@@ -264,12 +347,12 @@ async def run_one(identifier):
                 except (SupersededRun, TranslationConfigurationError):
                     raise
                 except Exception as error:
-                    article_errors[index] = {'article': index + 1,
-                                             'error': redact_translation_secrets(str(error))[:500] or type(error).__name__}
+                    article_errors[index] = url
+                    failed(url, error)
                 else:
-                    results[index] = result
+                    save_result(result, url)
                     article_errors.pop(index, None)
-                report(phase, len(results), len(items), failed_articles=len(article_errors),
+                report('translating', len(saved), len(items), failed_articles=len(article_errors),
                        retrying_articles=retrying)
 
             for index in range(len(items)):
@@ -277,37 +360,52 @@ async def run_one(identifier):
             retrying = True
             for index in list(article_errors):
                 await process(index)
-            report(phase, len(results), len(items), failed_articles=len(article_errors), retrying_articles=False)
-            if article_errors:
-                raise RuntimeError(f'本轮有 {len(article_errors)} 篇文章翻译失败，已保留旧版 RSS。')
-            results = [results[index] for index in range(len(items))]
-            return results
-        results = await asyncio.wait_for(produce(), timeout=1800)
-        report('publishing', len(results), len(results))
-        # The revision check, article replacement, completion and progress share one lock.
+            report('translating', len(saved), len(items), failed_articles=len(article_errors), retrying_articles=False)
+
+        await asyncio.wait_for(produce(), timeout=1800)
+        with storage.connect() as db:
+            remaining = pending(db)
+        if collection_error:
+            raise collection_error
+        if remaining:
+            raise RuntimeError(f'尚有 {len(remaining)} 篇文章待重试。' + (remaining[0][2] or ''))
         with storage.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             check_run(db, identifier, revision)
             previous = db.execute('SELECT published_revision FROM publications WHERE id=?', (identifier,)).fetchone()[0]
             if previous != revision:
+                receipts = [json.loads(row[0]) for row in db.execute('SELECT data FROM publication_pending WHERE source=? AND revision=? AND done=1', (identifier, revision))]
                 db.execute('DELETE FROM syndicated_articles WHERE source=?', (identifier,))
-            for article in results:
-                db.execute('INSERT INTO syndicated_articles VALUES (?,?,?,?) ON CONFLICT(source,identity) DO UPDATE SET published_at=excluded.published_at,data=excluded.data',
-                           (identifier, article.get('guid') or article['url'], article['published_at'], json.dumps(article, ensure_ascii=False)))
+                for article in receipts:
+                    db.execute('INSERT OR REPLACE INTO syndicated_articles VALUES (?,?,?,?)',
+                               (identifier, article.get('guid') or article['url'], article['published_at'], json.dumps(article, ensure_ascii=False)))
+            db.execute('DELETE FROM publication_pending WHERE source=? AND revision=?', (identifier, revision))
             db.execute('UPDATE publications SET status=?,error=NULL,next_run=?,updated_at=?,published_revision=?,published_config=? WHERE id=?',
                        ('published', time.time() + config.output.interval_minutes * 60, storage.now(), revision, config.model_dump_json(), identifier))
-            state = {'progress': {'phase': 'complete', 'completed': len(results), 'total': len(results), 'updated_at': storage.now()}}
-            db.execute('INSERT INTO source_states VALUES (?,?) ON CONFLICT(source) DO UPDATE SET data=excluded.data',
-                       (identifier, json.dumps(state)))
+            state = {'progress': {'phase': 'complete', 'completed': len(saved), 'total': len(saved),
+                                  'saved_articles': len(saved), 'pending_articles': 0, 'updated_at': storage.now()}}
+            db.execute('INSERT INTO source_states VALUES (?,?) ON CONFLICT(source) DO UPDATE SET data=excluded.data', (identifier, json.dumps(state)))
     except SupersededRun:
         return
     except Exception as error:
         message = redact_translation_secrets(str(error))[:500]
         if not message:
             message = '本轮执行超时，请检查站点或翻译服务。' if isinstance(error, asyncio.TimeoutError) else type(error).__name__
-        with storage.connect() as db:
-            db.execute("UPDATE publications SET status=?,error=?,next_run=?,updated_at=? WHERE id=? AND revision=? AND status='running'",
-                       ('failed', message, time.time() + config.output.interval_minutes * 60, storage.now(), identifier, revision))
+        try:
+            with storage.connect() as db:
+                remaining_count = len(pending(db))
+            if saved:
+                report('partial', len(saved), len(saved) + remaining_count, retrying_articles=False)
+            else:
+                report(storage.status(identifier).get('progress', {}).get('phase', 'discovering'),
+                       0, remaining_count, retrying_articles=False)
+            with storage.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                check_run(db, identifier, revision)
+                db.execute("UPDATE publications SET status=?,error=?,next_run=?,updated_at=? WHERE id=?",
+                           ('partial' if saved else 'failed', message, time.time() + config.output.interval_minutes * 60, storage.now(), identifier))
+        except SupersededRun:
+            return
 
 
 async def scheduler():
@@ -328,7 +426,7 @@ async def scheduler():
         try:
             while True:
                 with storage.connect() as db:
-                    ids = [r[0] for r in db.execute("SELECT id FROM publications WHERE status IN ('pending','published','failed') AND next_run<=? ORDER BY next_run LIMIT 10", (time.time(),))]
+                    ids = [r[0] for r in db.execute("SELECT id FROM publications WHERE status IN ('pending','published','partial','failed') AND next_run<=? ORDER BY next_run LIMIT 10", (time.time(),))]
                 for identifier in ids:
                     if len(active) >= 2:
                         break

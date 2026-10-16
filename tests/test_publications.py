@@ -114,7 +114,7 @@ def test_disabled_translation_never_builds_plugin(client, monkeypatch):
     assert publications.get('my-books')['status'] == 'published'
 
 
-def test_enabled_translation_is_cached_and_failure_is_atomic(client, monkeypatch):
+def test_enabled_translation_is_cached_and_failure_is_partial(client, monkeypatch):
     first, second = article('1'), article('2')
     plugin = type('Plugin', (), {'name': 'test_translate', 'cache_config': {'language': 'zh-CN'}})()
     plugin.apply = AsyncMock(return_value={**first, 'title': '书评'})
@@ -128,7 +128,7 @@ def test_enabled_translation_is_cached_and_failure_is_atomic(client, monkeypatch
     monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[first, second]))
     plugin.apply.side_effect = RuntimeError('translation unavailable')
     asyncio.run(publications.run_one('my-books'))
-    assert publications.get('my-books')['status'] == 'failed'
+    assert publications.get('my-books')['status'] == 'partial'
     assert storage.status('my-books')['articles'] == 1
 
 
@@ -165,7 +165,7 @@ def test_scheduler_runs_due_only_and_recovers_interrupted_job(client, monkeypatc
 
 def test_live_progress_separate_from_published_count(client, monkeypatch):
     first, second = article('1'), article('2')
-    async def collect(config, limit, *, progress):
+    async def collect(config, limit, *, progress, **kwargs):
         progress('fetching', 1, 2)
         state = client.get('/api/publications/my-books').json()
         assert state['status'] == 'running'
@@ -179,7 +179,7 @@ def test_live_progress_separate_from_published_count(client, monkeypatch):
         assert state['progress']['phase'] == 'translating'
         assert state['progress']['total'] == 2
         assert state['progress']['completed'] == (0 if value['guid'] == '1' else 1)
-        assert state['count'] == 0
+        assert state['count'] == (0 if value['guid'] == '1' else 1)
         if value['guid'] == '2':
             raise ValueError('failed second article')
         return value
@@ -189,11 +189,12 @@ def test_live_progress_separate_from_published_count(client, monkeypatch):
     publish(client, draft(plugins=[{'name': 'llm_translate', 'enabled': True}]))
     asyncio.run(publications.run_one('my-books'))
     state = client.get('/api/publications/my-books').json()
-    assert state['status'] == 'failed'
-    assert state['progress']['phase'] == 'translating'
+    assert state['status'] == 'partial'
+    assert state['progress']['phase'] == 'partial'
     assert state['progress']['completed'] == 1
-    assert state['count'] == 0
+    assert state['count'] == 1
     monkeypatch.setattr(plugin, 'apply', AsyncMock(side_effect=lambda value: value))
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[first, second]))
     asyncio.run(publications.run_one('my-books'))
     state = client.get('/api/publications/my-books').json()
     assert state['status'] == 'published' and state['count'] == 2
@@ -352,7 +353,7 @@ def test_stale_run_cannot_publish_progress_or_errors(client, monkeypatch, action
                 publish(client)
         if fails:
             raise RuntimeError('stale failure')
-    async def collect(config, limit, *, progress):
+    async def collect(config, limit, *, progress, **kwargs):
         if stage == 'collect':
             mutate()
             progress('fetching', 1, 1)
@@ -441,10 +442,11 @@ def test_permanent_article_failure_retains_feed_and_success_cache(client, monkey
     asyncio.run(publications.run_one('my-books'))
     assert calls == ['bad', 'good', 'bad']
     state = publications.get('my-books')
-    assert state['status'] == 'failed'
+    assert state['status'] == 'partial'
     assert state['progress']['failed_articles'] == 1
     assert state['progress']['retrying_articles'] is False
-    assert client.get('/feeds/my-books.xml').content == original
+    assert client.get('/feeds/my-books.xml').content != original
+    assert {a['guid'] for a in storage.articles(source='my-books')} == {'old', 'good'}
     asyncio.run(publications.run_one('my-books'))
     assert calls == ['bad', 'good', 'bad', 'bad', 'bad']
 
@@ -524,3 +526,58 @@ def test_scheduler_refills_two_slots_and_cancels_before_unlock(client, monkeypat
         with open(os.environ['ANY2RSS_DB'] + '.publications.lock', 'a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     asyncio.run(scenario())
+
+
+def test_partial_config_revision_keeps_old_feed_until_retries_complete(client, monkeypatch):
+    publish(client)
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[article('old')]))
+    asyncio.run(publications.run_one('my-books'))
+    publications.edit('my-books', DraftConfig.model_validate(draft()))
+    good, bad = article('good'), article('bad')
+
+    async def interrupted(config, limit, **callbacks):
+        callbacks['on_discovered']([good['url'], bad['url']])
+        callbacks['on_article'](good, good['url'])
+        assert {a['guid'] for a in storage.articles(source='my-books')} == {'old', 'good'}
+        raise ValueError('fetch timed out')
+
+    monkeypatch.setattr(execution, 'collect', interrupted)
+    asyncio.run(publications.run_one('my-books'))
+    assert publications.get('my-books')['status'] == 'partial'
+
+    async def retry(config, limit, **callbacks):
+        assert callbacks['retry_urls'] == [bad['url']]
+        callbacks['on_article'](bad, bad['url'])
+        return [bad]
+
+    monkeypatch.setattr(execution, 'collect', retry)
+    asyncio.run(publications.run_one('my-books'))
+    assert publications.get('my-books')['status'] == 'published'
+    assert {a['guid'] for a in storage.articles(source='my-books')} == {'good', 'bad'}
+
+
+def test_cancellation_keeps_successes_and_raw_translation_retry(client, monkeypatch):
+    publish(client, draft(plugins=[{'name': 'llm_translate', 'enabled': True}]))
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[article('good'), article('retry')]))
+    plugin = type('Plugin', (), {'name': 'test', 'cache_config': {}})()
+    async def apply(value):
+        if value['guid'] == 'retry':
+            raise asyncio.CancelledError
+        return value
+    plugin.apply = apply
+    monkeypatch.setattr(publications, 'build', lambda _: plugin)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(publications.run_one('my-books'))
+    assert [a['guid'] for a in storage.articles(source='my-books')] == ['good']
+    with storage.connect() as db:
+        rows = db.execute('SELECT url,data FROM publication_pending WHERE done=0').fetchall()
+        assert len(rows) == 1 and rows[0][0] == article('retry')['url'] and rows[0][1]
+        # Scheduler startup recovers interrupted runs this way.
+        db.execute("UPDATE publications SET status='pending' WHERE status='running'")
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[]))
+    plugin.apply = AsyncMock(side_effect=lambda value: value)
+    asyncio.run(publications.run_one('my-books'))
+    plugin.apply.assert_awaited_once()
+    assert plugin.apply.call_args.args[0]['guid'] == 'retry'
+    assert publications.get('my-books')['status'] == 'published'
+    assert {a['guid'] for a in storage.articles(source='my-books')} == {'good', 'retry'}

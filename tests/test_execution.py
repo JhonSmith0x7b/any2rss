@@ -268,3 +268,113 @@ def test_large_page_limit_is_enforced_while_streaming(monkeypatch, body_size, su
         with pytest.raises(ValueError, match='10 MiB.*http://example.com/large'):
             execution.fetch('http://example.com/large')
     assert closed == [True]
+
+
+def test_partial_collection_persists_successes_and_continues_failures(monkeypatch):
+    events = []
+    def fake_fetch(url):
+        events.append(('fetch', url))
+        if url.endswith('/list'):
+            return b'<div class="article"><a href="/a">A</a><a href="/bad">Bad</a><a href="/b">B</a></div>', url, 'text/html'
+        if url.endswith('/bad'):
+            raise OSError('connection failed')
+        return ARTICLE.encode(), url + '/redirect', 'text/html'
+    monkeypatch.setattr(execution, 'fetch', fake_fetch)
+    errors = []
+    articles = asyncio.run(execution.collect(
+        config(), 3, on_discovered=lambda urls: events.append(('discovered', urls)),
+        on_article=lambda article, requested: events.append(('saved', requested, article['url'])),
+        on_error=lambda url, error: errors.append((url, str(error))),
+    ))
+    assert [item['url'] for item in articles] == ['https://example.com/a/redirect', 'https://example.com/b/redirect']
+    assert errors == [('https://example.com/bad', 'connection failed')]
+    assert events[1] == ('discovered', ['https://example.com/a', 'https://example.com/bad', 'https://example.com/b'])
+    assert events.index(('saved', 'https://example.com/a', 'https://example.com/a/redirect')) < events.index(('fetch', 'https://example.com/bad'))
+
+
+@pytest.mark.parametrize('callback', ['on_article', 'on_discovered', 'on_error'])
+def test_partial_callback_errors_propagate(monkeypatch, callback):
+    def fake_fetch(url):
+        if url.endswith('/list'):
+            return b'<div class="article"><a href="/a">A</a></div>', url, 'text/html'
+        if callback == 'on_error':
+            raise OSError('fetch failed')
+        return ARTICLE.encode(), url, 'text/html'
+    monkeypatch.setattr(execution, 'fetch', fake_fetch)
+    errors = []
+    def fail(*args):
+        raise RuntimeError('storage failed')
+    callbacks = {'on_error': lambda *args: errors.append(args), callback: fail}
+    with pytest.raises(RuntimeError, match='storage failed'):
+        asyncio.run(execution.collect(config(), 1, **callbacks))
+    assert errors == []
+
+
+def test_retries_prioritized_deduplicated_and_limited(monkeypatch):
+    calls = []
+    def fake_fetch(url):
+        calls.append(url)
+        if url.endswith('/list'):
+            return b'<div class="article"><a href="/new">New</a><a href="/retry">Retry</a></div>', url, 'text/html'
+        return ARTICLE.encode(), url, 'text/html'
+    monkeypatch.setattr(execution, 'fetch', fake_fetch)
+    articles = asyncio.run(execution.collect(config(), 2, retry_urls=(
+        'https://example.com/retry', 'https://example.com/retry#duplicate', 'https://example.com/old'),
+        on_error=lambda *args: None))
+    assert [item['url'] for item in articles] == ['https://example.com/retry', 'https://example.com/new']
+    assert calls == ['https://example.com/list', 'https://example.com/retry', 'https://example.com/new']
+
+
+def test_listing_failure_still_retries_previous_urls(monkeypatch):
+    def fake_fetch(url):
+        if url.endswith('/list'):
+            raise OSError('listing unavailable')
+        return ARTICLE.encode(), url, 'text/html'
+    monkeypatch.setattr(execution, 'fetch', fake_fetch)
+    errors, discovered = [], []
+    articles = asyncio.run(execution.collect(config(), 2, retry_urls=('https://example.com/old',),
+        on_discovered=discovered.extend, on_error=lambda url, error: errors.append((url, str(error)))))
+    assert [item['url'] for item in articles] == discovered == ['https://example.com/old']
+    assert errors == [('https://example.com/list', 'listing unavailable')]
+
+
+def test_collection_without_error_callback_still_fails_fast(monkeypatch):
+    def fake_fetch(url):
+        if url.endswith('/list'):
+            return b'<div class="article"><a href="/a">A</a></div>', url, 'text/html'
+        raise OSError('article unavailable')
+    monkeypatch.setattr(execution, 'fetch', fake_fetch)
+    with pytest.raises(OSError, match='article unavailable'):
+        asyncio.run(execution.collect(config(), 2))
+
+
+def test_rss_collection_invokes_success_callback(monkeypatch):
+    value = deepcopy(EXAMPLES['rss'])
+    value['output'] = {'id': 'example', 'title': 'Example'}
+    cfg = DraftConfig.model_validate(value)
+    item = {'url': 'https://example.com/item'}
+    monkeypatch.setattr(execution, 'fetch', lambda url: (b'feed', url, 'application/xml'))
+    monkeypatch.setattr(execution, 'parse_rss', lambda *args: [item])
+    saved = []
+    assert asyncio.run(execution.collect(cfg, on_article=lambda article, url: saved.append((article, url)))) == [item]
+    assert saved == [(item, item['url'])]
+
+
+@pytest.mark.parametrize('limit,fresh_count', [(1, 0), (2, 1), (3, 2), (4, 2)])
+def test_retry_backlog_leaves_capacity_for_fresh_articles(monkeypatch, limit, fresh_count):
+    retries = [f'https://example.com/retry-{index}' for index in range(10)]
+    fetched, discovered, failed = [], [], []
+    def fake_fetch(url):
+        if url.endswith('/list'):
+            return ('<div class="article">' + ''.join(f'<a href="/fresh-{i}">Fresh</a>' for i in range(4)) + '</div>').encode(), url, 'text/html'
+        fetched.append(url)
+        if url in retries:
+            raise OSError('still unavailable')
+        return ARTICLE.encode(), url, 'text/html'
+    monkeypatch.setattr(execution, 'fetch', fake_fetch)
+    articles = asyncio.run(execution.collect(config(), limit, retry_urls=retries,
+        on_discovered=discovered.extend, on_error=lambda url, error: failed.append(url)))
+    assert len(fetched) == limit
+    assert fetched == discovered
+    assert failed == retries[:limit - fresh_count]
+    assert [item['url'] for item in articles] == [f'https://example.com/fresh-{i}' for i in range(fresh_count)]

@@ -88,7 +88,7 @@ body:has(dialog[open])>.position-nav,body:has(dialog[open])>.position-label,body
 <div id="publication-result" hidden><a id="publication-link" class="feed-address" target="_blank" rel="noopener noreferrer"></a><div class="actions"><button class="button soft" id="copy-feed">复制订阅地址</button></div></div>
 <div class="actions" id="manage-actions" hidden><button class="button" id="edit-subscription">编辑订阅</button><button class="button danger" id="delete-subscription">删除订阅</button></div><p class="hint" id="managed-note" hidden>内置示例由服务端管理；编辑、删除目前适用于自行添加的订阅。</p>
 <div id="detail-loading" class="status" role="status"></div><div id="detail-content" hidden><section class="panel"><h3>来源与处理</h3><dl id="detail-meta" class="summary"></dl></section><section class="panel"><div class="panel-head"><h3>最近发布的文章</h3><span class="hint">当前 RSS 内容</span></div><div id="detail-articles"></div></section><details id="detail-config"><summary>查看已发布的配置 JSON</summary><pre id="detail-json"></pre></details></div>
-<p class="hint detail-note">每 3 秒自动刷新进度。处理中保留上次发布内容，整轮成功后更新 RSS。</p></dialog>
+<p class="hint detail-note">每 3 秒自动刷新进度。成功文章会及时保存并合并到 RSS，失败或未完成的文章将在下轮重试。</p></dialog>
 
 <dialog id="prompt-dialog"><h2>Agent 提示词</h2><p class="hint">自动复制不可用，请选中下方文字手动复制。</p>
 <label for="prompt-text">完整提示词</label><textarea id="prompt-text" readonly></textarea>
@@ -164,16 +164,16 @@ function feedUrl(data){
  if(!(data.count>0)||!publicationIdPattern.test(data.id)||typeof data.feed_url!=='string')return null;
  try{const url=new URL(data.feed_url,location.origin);if(url.origin!==location.origin||url.pathname!==APP_BASE+'/feeds/'+data.id+'.xml'||url.hash||url.username||url.password)return null;const params=[...url.searchParams];if(params.length>1||params.some(([key,value])=>key!=='token'||! /^[a-f0-9]{64}$/.test(value)))return null;return url.href}catch{return null}
 }
-const publicationLabels={pending:'等待后台采集',running:'更新处理中',published:'已发布',failed:'处理失败'};
+const publicationLabels={pending:'等待后台采集',running:'更新处理中',published:'已发布',partial:'部分成功',failed:'处理失败'};
 function renderProgress(container,data){
  container.replaceChildren();const active=['pending','running'].includes(data.status),progress=data.progress;
  const hint=message=>{const line=document.createElement('p');line.className='hint';line.textContent=message;container.append(line)};
- if(active||(data.status==='failed'&&progress)){
-  const labels={discovering:'发现文章链接',fetching:'抓取文章正文',translating:'翻译文章',processing:'处理内容',publishing:'写入 RSS',complete:'本轮处理完成'};
+ if(active||(['failed','partial'].includes(data.status)&&progress)){
+  const labels={discovering:'发现文章链接',fetching:'抓取文章正文',translating:'翻译文章',processing:'处理内容',publishing:'写入 RSS',complete:'本轮处理完成',partial:'本轮部分完成'};
   const phase=progress&&labels[progress.phase]?progress.phase:null;
   const total=Number.isInteger(progress?.total)&&progress.total>=0?progress.total:null;
   const completed=Number.isInteger(progress?.completed)&&progress.completed>=0?progress.completed:0;
-  hint((data.status==='failed'?'本轮已停止 · ':'')+(phase?labels[phase]:data.status==='pending'?'排队等待（最多同时处理 2 个订阅）':'正在处理，等待阶段进度')+(phase?(total===null?' · 已完成 '+completed+'，总数待确定':' · 已完成 '+completed+' / '+total+' 篇'):''));
+  hint((data.status==='failed'?'本轮已停止 · ':data.status==='partial'&&phase!=='partial'?'本轮部分完成 · ':'')+(phase?labels[phase]:data.status==='pending'?'排队等待（最多同时处理 2 个订阅）':'正在处理，等待阶段进度')+(phase?(total===null?' · 已完成 '+completed+'，总数待确定':' · 已完成 '+completed+' / '+total+' 篇'):''));
   if(active){const bar=document.createElement('progress');bar.setAttribute('aria-label',phase?labels[phase]:'等待处理进度');if(total>0){bar.max=total;bar.value=Math.min(completed,total)}container.append(bar)}
   if(phase==='translating'){
    const parts=[];
@@ -184,16 +184,19 @@ function renderProgress(container,data){
    if(active&&batchLabels[progress.batch_status])parts.push(batchLabels[progress.batch_status]);
    if(active&&progress.batch_status==='retrying'&&Number.isInteger(progress.attempt))parts.push('第 '+progress.attempt+' 次请求');
    if(parts.length)hint(parts.join(' · '));
-   if(Number.isInteger(progress.failed_articles)&&progress.failed_articles>0)hint('尚有 '+progress.failed_articles+' 篇翻译失败'+(active?'，继续处理其余文章后补试':'，保留上次成功发布的 RSS'));
    if(progress.last_response_at&&!Number.isNaN(Date.parse(progress.last_response_at)))hint('最近翻译响应：'+new Date(progress.last_response_at).toLocaleString('zh-CN',{hour12:false}));
   }
  }
- hint('RSS 已发布：'+(data.count??0)+' 篇'+(active?(data.count>0?' · 当前仍为上次结果，整轮成功后更新':' · 首轮完成后生成订阅'):data.status==='failed'&&data.count>0?' · 保留上次成功结果':''));
- if(progress?.updated_at&&!Number.isNaN(Date.parse(progress.updated_at))&&(active||data.status==='failed'))hint('进度更新时间：'+new Date(progress.updated_at).toLocaleString('zh-CN',{hour12:false}));
+ if(Number.isInteger(progress?.failed_articles)&&progress.failed_articles>0)hint('尚有 '+progress.failed_articles+' 篇翻译失败'+(active?'，继续处理其余文章后补试':'，将在下轮重试'));
+ const saved=Number.isInteger(progress?.saved_articles)&&progress.saved_articles>0?progress.saved_articles:0;
+ if(saved)hint('本轮已保存 '+saved+' 篇，已合并到 RSS');
+ if(data.status==='partial')hint(Number.isInteger(progress?.pending_articles)&&progress.pending_articles>0?'剩余 '+progress.pending_articles+' 篇将在下轮重试':'失败或未完成的文章将在下轮重试');
+ hint('RSS 已发布：'+(data.count??0)+' 篇'+(active?' · 成功文章陆续合并更新':data.status==='failed'&&data.count>0&&!saved?' · 保留上次成功结果':''));
+ if(progress?.updated_at&&!Number.isNaN(Date.parse(progress.updated_at))&&(active||['failed','partial'].includes(data.status)))hint('进度更新时间：'+new Date(progress.updated_at).toLocaleString('zh-CN',{hour12:false}));
 }
 function renderPublication(data){
  const url=feedUrl(data);
- publicationStatus((data.title||data.id)+' · '+(publicationLabels[data.status]||'未知状态')+(data.error?'\n'+data.error:''),data.status==='failed');
+ publicationStatus((data.title||data.id)+' · '+(publicationLabels[data.status]||'未知状态')+(data.error?'\n'+data.error:''),['failed','partial'].includes(data.status));
  renderProgress($('publication-progress'),data);
  $('publication-result').hidden=!url;if(url){$('publication-link').href=url;$('publication-link').textContent=url}else{$('publication-link').removeAttribute('href');$('publication-link').textContent=''}
 
@@ -231,7 +234,7 @@ function renderDetail(data){
  const plugins=Array.isArray(data.plugins)?data.plugins.filter(plugin=>plugin.enabled!==false):[];
  metaRow('内容处理',plugins.length?plugins.map(plugin=>plugin.name==='llm_translate'?'AI 翻译 · '+(plugin.target_language||'默认语言')+' · '+(plugin.model||'默认模型'):plugin.name).join('；'):'保留原文');
  $('detail-articles').replaceChildren();const entries=Array.isArray(data.items)?data.items:[];
- if(!entries.length){const empty=document.createElement('p');empty.className='hint';empty.textContent='暂无已发布文章，首轮处理完成后会显示在这里。';$('detail-articles').append(empty)}
+ if(!entries.length){const empty=document.createElement('p');empty.className='hint';empty.textContent='暂无已发布文章，文章成功保存后会显示在这里。';$('detail-articles').append(empty)}
  for(const item of entries){const article=document.createElement('article');article.className='detail-article';article.append(safeLink(item.url,item.title||'无标题'));const date=document.createElement('p');date.className='hint';date.textContent=item.published_at&&!Number.isNaN(Date.parse(item.published_at))?new Date(item.published_at).toLocaleString('zh-CN',{hour12:false}):'日期未标注';article.append(date);if(item.summary){const summary=document.createElement('p');summary.className='article-summary';summary.textContent=item.summary;article.append(summary)}$('detail-articles').append(article)}
  $('detail-config').hidden=!data.config;$('detail-json').textContent=data.config?JSON.stringify(data.config,null,2):'';$('detail-content').hidden=false;
 }
@@ -254,7 +257,7 @@ function editSubscription(detailData){
  const config=structuredClone(detailData.config);newDraftSnapshot={mode,form:capture(),drafts:structuredClone(drafts)};editId=detailData.id;
  switchMode(config.source.type);const plugin=config.plugins.find(p=>p.name==='llm_translate');
  restore({'source-json':JSON.stringify({schema_version:config.schema_version,source:config.source},null,2),'web-url':config.source.url,'rss-url':config.source.url,'goal':'','feed-title':config.output.title,'feed-id':config.output.id,'interval':String(config.output.interval_minutes),'item-limit':String(config.output.item_limit),'translate':!!plugin&&plugin.enabled!==false,'model':plugin?.model||'qwen/qwen3.7-flash','language':plugin?.target_language||'zh-CN'});
- $('feed-id').readOnly=true;$('save').hidden=true;$('config-heading').textContent='编辑订阅';$('config-description').textContent='保存后按新配置更新；RSS 地址不变，成功前保留上次内容。';$('publish').textContent='保存并更新';$('close-config').setAttribute('aria-label','关闭编辑订阅');invalidate();status('已载入 '+config.output.title+' 的服务端配置。订阅 ID 不可修改。');$('detail-dialog').close();$('config-dialog').showModal();
+ $('feed-id').readOnly=true;$('save').hidden=true;$('config-heading').textContent='编辑订阅';$('config-description').textContent='保存后按新配置更新；RSS 地址不变，成功文章陆续合并更新。';$('publish').textContent='保存并更新';$('close-config').setAttribute('aria-label','关闭编辑订阅');invalidate();status('已载入 '+config.output.title+' 的服务端配置。订阅 ID 不可修改。');$('detail-dialog').close();$('config-dialog').showModal();
 }
 $('edit-subscription').addEventListener('click',()=>editSubscription(detailData));
 function confirmDelete(data){if(!data||data.kind!=='custom')return;deleteTarget={id:data.id,title:data.title};$('delete-name').textContent=data.title;$('delete-error').textContent='';$('delete-dialog').showModal()}

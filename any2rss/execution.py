@@ -185,11 +185,14 @@ def parse_web(html, url, source, *, body_html=None):
             'source': urlsplit(source.url).hostname, 'category': ''}
 
 
-async def _collect(config, limit, progress):
+async def _collect(config, limit, progress, on_article, on_discovered, on_error, retry_urls):
     source = config.source
     if source.type == 'rss':
         data, final_url, _ = await asyncio.to_thread(fetch, source.url)
         items = parse_rss(data, final_url)[:limit]
+        for item in items:
+            if on_article:
+                on_article(item, item['url'])
         progress('fetching', len(items), len(items))
         return items
 
@@ -247,50 +250,69 @@ async def _collect(config, limit, progress):
             data, final_url, _ = await asyncio.to_thread(fetch, url)
             return data, final_url
 
-        links = []
-        seen = set()
+        links = list(dict.fromkeys(canonical(url, source.url) for url in retry_urls))
+        retry_links = links.copy()
+        retry_set = set(retry_links)
+        seen = set(links)
+        discovered = set()
+        fresh_target = (limit + 1) // 2 if retry_links else limit
         list_url = source.url
         visited = set()
-        for index in range(source.pagination.max_pages):
-            if index and source.pagination.mode == 'scroll':
-                await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                await page.wait_for_timeout(1500)
-                html, base = await page.content(), page.url
-                if len(html.encode()) > MAX_BYTES:
-                    raise ValueError(f'浏览器页面超过 {MAX_BYTES // (1024 * 1024)} MiB 限制：{page.url}')
-            else:
-                if list_url in visited:
+        found_link = False
+        try:
+            for index in range(source.pagination.max_pages):
+                if index and source.pagination.mode == 'scroll':
+                    await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                    await page.wait_for_timeout(1500)
+                    html, base = await page.content(), page.url
+                    if len(html.encode()) > MAX_BYTES:
+                        raise ValueError(f'浏览器页面超过 {MAX_BYTES // (1024 * 1024)} MiB 限制：{page.url}')
+                else:
+                    if list_url in visited:
+                        break
+                    visited.add(list_url)
+                    html, base = await load(list_url, source.loading.wait_selector)
+                soup = BeautifulSoup(html, 'html.parser')
+                before = len(discovered)
+                for anchor in soup.select(source.list.item_selector):
+                    if not anchor.get('href'):
+                        continue
+                    try:
+                        link = canonical(anchor['href'], base)
+                    except ValueError:
+                        continue
+                    found_link = True
+                    discovered.add(link)
+                    if link not in seen:
+                        seen.add(link)
+                        links.append(link)
+                if len(discovered - retry_set) >= fresh_target or len(discovered) == before:
                     break
-                visited.add(list_url)
-                html, base = await load(list_url, source.loading.wait_selector)
-            soup = BeautifulSoup(html, 'html.parser')
-            before = len(links)
-            for anchor in soup.select(source.list.item_selector):
-                if not anchor.get('href'):
-                    continue
-                try:
-                    link = canonical(anchor['href'], base)
-                except ValueError:
-                    continue
-                if link not in seen:
-                    seen.add(link)
-                    links.append(link)
-            if len(links) >= limit or len(links) == before:
-                break
-            if source.pagination.mode == 'next':
-                anchor = soup.select_one(source.pagination.next_selector)
-                if anchor is None or not anchor.get('href'):
+                if source.pagination.mode == 'next':
+                    anchor = soup.select_one(source.pagination.next_selector)
+                    if anchor is None or not anchor.get('href'):
+                        break
+                    list_url = canonical(anchor['href'], base)
+                elif source.pagination.mode == 'none':
                     break
-                list_url = canonical(anchor['href'], base)
-            elif source.pagination.mode == 'none':
-                break
-        if not links:
-            raise ValueError('列表选择器未找到文章链接，请检查 item_selector' + (f'；{blocked[-1]}' if blocked else ''))
+            if not found_link:
+                raise ValueError('列表选择器未找到文章链接，请检查 item_selector' + (f'；{blocked[-1]}' if blocked else ''))
+        except Exception as exc:
+            if on_error is None:
+                raise
+            on_error(source.url, exc)
+        fresh_links = [url for url in links if url not in retry_set]
+        # Bound retries so a persistent backlog cannot starve newly listed articles.
+        fresh_slots = min(len(fresh_links), (limit + 1) // 2) if limit > 1 else 0
+        retry_count = min(len(retry_links), limit - fresh_slots)
+        links = retry_links[:retry_count] + fresh_links[:limit - retry_count]
+        if on_discovered:
+            on_discovered(links)
         articles = []
         progress('fetching', 0, min(limit, len(links)))
         for number, url in enumerate(links[:limit], start=1):
-            html, final_url = await load(url, source.article.body.selector if page else None)
             try:
+                html, final_url = await load(url, source.article.body.selector if page else None)
                 body_html = None
                 if source.article.body.adapter == 'gcores':
                     from .gcores import render_body
@@ -305,8 +327,16 @@ async def _collect(config, limit, progress):
                         raise ValueError('机核接口返回的文章 ID 不匹配')
                     body_html = await asyncio.to_thread(render_body, payload)
                 article = await asyncio.to_thread(parse_web, html, final_url, source, body_html=body_html)
-            except ValueError as exc:
-                raise ValueError(f'{url}：{exc}') from exc
+            except Exception as exc:
+                if on_error is None:
+                    if isinstance(exc, ValueError):
+                        raise ValueError(f'{url}：{exc}') from exc
+                    raise
+                on_error(url, exc)
+                progress('fetching', number, len(links))
+                continue
+            if on_article:
+                on_article(article, url)
             if not any(item['url'] == article['url'] for item in articles):
                 articles.append(article)
             progress('fetching', number, min(limit, len(links)))
@@ -318,13 +348,18 @@ async def _collect(config, limit, progress):
             await pw.stop()
 
 
-async def collect(config: DraftConfig, limit: int = 20, *, progress=None) -> list[dict]:
-    """Collect a bounded batch without saving or running optional plugins."""
+async def collect(config: DraftConfig, limit: int = 20, *, progress=None, on_article=None,
+                  on_discovered=None, on_error=None, retry_urls=()) -> list[dict]:
+    """Collect a bounded batch; callbacks can persist successes before completion.
+
+    Supplying on_error continues past individual failures. Callbacks are synchronous
+    and their exceptions propagate to the caller.
+    """
     if not 1 <= limit <= 200:
         raise ValueError('单次抓取数量必须介于 1 和 200')
     progress = progress or (lambda phase, completed=0, total=None: None)
     progress('discovering')
     try:
-        return await asyncio.wait_for(_collect(config, limit, progress), timeout=240)
+        return await asyncio.wait_for(_collect(config, limit, progress, on_article, on_discovered, on_error, retry_urls), timeout=240)
     except asyncio.TimeoutError as exc:
         raise ValueError('抓取超过 240 秒，请降低条数或检查网站响应') from exc
