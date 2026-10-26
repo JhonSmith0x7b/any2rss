@@ -581,3 +581,37 @@ def test_cancellation_keeps_successes_and_raw_translation_retry(client, monkeypa
     assert plugin.apply.call_args.args[0]['guid'] == 'retry'
     assert publications.get('my-books')['status'] == 'published'
     assert {a['guid'] for a in storage.articles(source='my-books')} == {'good', 'retry'}
+
+
+def test_translation_body_setting_defaults_and_edits_round_trip(client, monkeypatch):
+    data = draft(plugins=[{'name': 'llm_translate', 'enabled': True}])
+    publish(client, data)
+    detail = client.get('/api/subscriptions/my-books').json()
+    assert detail['config']['plugins'][0]['translate_body'] is False
+    data['plugins'][0]['translate_body'] = True
+    assert client.put('/api/subscriptions/my-books', json=data).status_code == 202
+    assert client.get('/api/subscriptions/my-books').json()['config']['plugins'][0]['translate_body'] is True
+    monkeypatch.setattr(execution, 'collect', AsyncMock(return_value=[article()]))
+    modes = []
+    def build(options):
+        modes.append(options['translate_body'])
+        plugin = type('Plugin', (), {'name': 'mode-test', 'cache_config': {}})()
+        plugin.apply = AsyncMock(side_effect=lambda value: value)
+        return plugin
+    monkeypatch.setattr(publications, 'build', build)
+    asyncio.run(publications.run_one('my-books'))
+    assert modes == [True]
+    data['plugins'][0]['translate_body'] = False
+    assert client.put('/api/subscriptions/my-books', json=data).status_code == 202
+    asyncio.run(publications.run_one('my-books'))
+    assert modes == [True, False]
+
+
+def test_existing_stored_config_without_body_setting_is_title_only(client):
+    import json
+    publish(client, draft(plugins=[{'name': 'llm_translate', 'enabled': True}]))
+    with storage.connect() as db:
+        raw = json.loads(db.execute('SELECT config FROM publications WHERE id=?', ('my-books',)).fetchone()[0])
+        del raw['plugins'][0]['translate_body']
+        db.execute('UPDATE publications SET config=? WHERE id=?', (json.dumps(raw), 'my-books'))
+    assert publications.get('my-books')['config'].plugins[0].translate_body is False

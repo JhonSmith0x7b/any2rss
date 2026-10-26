@@ -66,7 +66,7 @@ body:has(dialog[open])>.position-nav,body:has(dialog[open])>.position-label,body
 <label class="switch" for="translate"><input type="checkbox" id="translate">使用</label></div>
 <div class="fields" id="translation-fields" hidden><div>
 <label for="model">模型</label><select id="model"><option value="qwen/qwen3.7-flash">Qwen 3.7 Flash（OpenRouter）</option><option value="deepseek-flash">DeepSeek V4.1 Flash</option></select></div><div>
-<label for="language">目标语言</label><select id="language"><option value="zh-CN">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select></div></div><p class="hint">密钥由服务端配置。发布后由后台执行翻译；首次处理可能需要几分钟。</p></section>
+<label for="language">目标语言</label><select id="language"><option value="zh-CN">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select></div><div><label class="switch" for="translate-body"><input type="checkbox" id="translate-body">翻译正文</label><p class="hint">关闭时仅翻译标题，摘要和正文保留原文。</p></div></div><p class="hint">密钥由服务端配置。发布后由后台执行翻译；首次处理可能需要几分钟。</p></section>
 
 
 <section class="panel"><div class="panel-head"><h2><span class="section-no">03</span>订阅输出</h2><span class="hint">OUTPUT</span></div>
@@ -103,11 +103,11 @@ let spec=null,mode='webpage',drafts={},revision=0,validated=null,validationRevis
 const publicationIdPattern=/^[a-z0-9][a-z0-9_-]{0,79}$/;
 let publicationId=null,submitting=false,publicationTimer=null,publicationsRequest=null,detailRevision=0,detailSignature=null,detailRequest=null,listSignature=null;
 let detailData=null,editId=null,newDraftSnapshot=null,deleteTarget=null,deleting=false;
-const editable=['web-url','goal','source-json','rss-url','translate','model','language','feed-title','feed-id','interval','item-limit'];
+const editable=['web-url','goal','source-json','rss-url','translate','translate-body','model','language','feed-title','feed-id','interval','item-limit'];
 function status(message,error=false){$('status').textContent=message;$('status').classList.toggle('error',error)}
 function invalidate(){revision++;validated=null;validationRevision=-1;$('save').disabled=true;$('export').disabled=true;$('validation-badge').textContent='尚未校验';updateSummary()}
 function updateSummary(){
- $('summary-mode').textContent=mode==='webpage'?'网页 → RSS':'RSS → RSS';$('summary-plugin').textContent=$('translate').checked?'AI 翻译 · '+$('language').selectedOptions[0].textContent:'保留原文';
+ $('summary-mode').textContent=mode==='webpage'?'网页 → RSS':'RSS → RSS';$('summary-plugin').textContent=$('translate').checked?'AI 翻译 · '+($('translate-body').checked?'标题与正文':'仅标题')+' · '+$('language').selectedOptions[0].textContent:'保留原文';
  let sourceUrl=$('rss-url').value;if(mode==='webpage'){try{sourceUrl=JSON.parse($('source-json').value).source?.url||'尚未填写'}catch{sourceUrl='JSON 待修正'}}$('summary-url').textContent=sourceUrl||'—';
  $('summary-title').textContent=$('feed-title').value||'—';$('translation-fields').hidden=!$('translate').checked;
 }
@@ -127,7 +127,7 @@ function sourceDocument(){
  const unknown=Object.keys(doc).filter(key=>!['schema_version','source'].includes(key));if(unknown.length)throw new Error('源站 JSON 含未知字段：'+unknown.join('、')+'。此处只接受 schema_version 和 source。');
  if(doc.source?.type==='rss')throw new Error('Agent 发现了 RSS：请切换到 RSS → RSS 模式，并将 source.url 填入 RSS 地址。');if(doc.source?.type!=='webpage')throw new Error('网页模式要求 source.type 为 webpage。');return doc;
 }
-function fullConfig(){return {...sourceDocument(),plugins:$('translate').checked?[{name:'llm_translate',enabled:true,model:$('model').value,target_language:$('language').value}]:[],output:{id:$('feed-id').value.trim(),title:$('feed-title').value.trim(),interval_minutes:Number($('interval').value),item_limit:Number($('item-limit').value)}}}
+function fullConfig(){return {...sourceDocument(),plugins:$('translate').checked?[{name:'llm_translate',enabled:true,model:$('model').value,target_language:$('language').value,translate_body:$('translate-body').checked}]:[],output:{id:$('feed-id').value.trim(),title:$('feed-title').value.trim(),interval_minutes:Number($('interval').value),item_limit:Number($('item-limit').value)}}}
 async function request(url,options={}){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);try{if(options.method&&!['GET','HEAD'].includes(options.method.toUpperCase()))options={...options,headers:{'Content-Type':'application/json',...options.headers}};const response=await fetch(APP_BASE+url,{...options,signal:controller.signal});if(response.status===401){location.replace(APP_BASE+'/login');throw new Error('登录已过期，请重新登录。')}const data=await response.json();if(!response.ok){const detail=Array.isArray(data.detail)?data.detail.map(e=>(e.loc||[]).join('.')+': '+e.msg).join('\n'):String(data.detail||'请求失败');const error=new Error(detail);error.status=response.status;throw error}return data}finally{clearTimeout(timer)}}
 for(const id of editable)$(id).addEventListener('input',()=>{invalidate();status('配置已修改，请重新校验。')});
 for(const type of ['webpage','rss'])$('mode-'+type).addEventListener('click',()=>switchMode(type));
@@ -232,7 +232,7 @@ function renderDetail(data){
  $('detail-heading').textContent=data.title||data.id;$('detail-id').textContent=data.id;$('detail-meta').replaceChildren();
  metaRow('管理方式',data.kind==='builtin'?'内置订阅 · 由服务端管理':'自定义订阅');metaRow('采集方式',data.source_type==='rss'?'RSS → RSS':'网页 → RSS');metaRow('来源地址',safeLink(data.source_url,data.source_url||'未提供'));metaRow('更新间隔',data.interval_minutes?data.interval_minutes+' 分钟':'由服务端调度');metaRow('条目上限',data.item_limit??'由服务端管理');
  const plugins=Array.isArray(data.plugins)?data.plugins.filter(plugin=>plugin.enabled!==false):[];
- metaRow('内容处理',plugins.length?plugins.map(plugin=>plugin.name==='llm_translate'?'AI 翻译 · '+(plugin.target_language||'默认语言')+' · '+(plugin.model||'默认模型'):plugin.name).join('；'):'保留原文');
+ metaRow('内容处理',plugins.length?plugins.map(plugin=>plugin.name==='llm_translate'?'AI 翻译 · '+(plugin.translate_body===true?'标题与正文':'仅标题')+' · '+(plugin.target_language||'默认语言')+' · '+(plugin.model||'默认模型'):plugin.name).join('；'):'保留原文');
  $('detail-articles').replaceChildren();const entries=Array.isArray(data.items)?data.items:[];
  if(!entries.length){const empty=document.createElement('p');empty.className='hint';empty.textContent='暂无已发布文章，文章成功保存后会显示在这里。';$('detail-articles').append(empty)}
  for(const item of entries){const article=document.createElement('article');article.className='detail-article';article.append(safeLink(item.url,item.title||'无标题'));const date=document.createElement('p');date.className='hint';date.textContent=item.published_at&&!Number.isNaN(Date.parse(item.published_at))?new Date(item.published_at).toLocaleString('zh-CN',{hour12:false}):'日期未标注';article.append(date);if(item.summary){const summary=document.createElement('p');summary.className='article-summary';summary.textContent=item.summary;article.append(summary)}$('detail-articles').append(article)}
@@ -256,7 +256,7 @@ function editSubscription(detailData){
  if(!spec||!detailData?.config||detailData.kind!=='custom'||submitting)return;
  const config=structuredClone(detailData.config);newDraftSnapshot={mode,form:capture(),drafts:structuredClone(drafts)};editId=detailData.id;
  switchMode(config.source.type);const plugin=config.plugins.find(p=>p.name==='llm_translate');
- restore({'source-json':JSON.stringify({schema_version:config.schema_version,source:config.source},null,2),'web-url':config.source.url,'rss-url':config.source.url,'goal':'','feed-title':config.output.title,'feed-id':config.output.id,'interval':String(config.output.interval_minutes),'item-limit':String(config.output.item_limit),'translate':!!plugin&&plugin.enabled!==false,'model':plugin?.model||'qwen/qwen3.7-flash','language':plugin?.target_language||'zh-CN'});
+ restore({'source-json':JSON.stringify({schema_version:config.schema_version,source:config.source},null,2),'web-url':config.source.url,'rss-url':config.source.url,'goal':'','feed-title':config.output.title,'feed-id':config.output.id,'interval':String(config.output.interval_minutes),'item-limit':String(config.output.item_limit),'translate':!!plugin&&plugin.enabled!==false,'translate-body':!!plugin&&plugin.translate_body===true,'model':plugin?.model||'qwen/qwen3.7-flash','language':plugin?.target_language||'zh-CN'});
  $('feed-id').readOnly=true;$('save').hidden=true;$('config-heading').textContent='编辑订阅';$('config-description').textContent='保存后按新配置更新；RSS 地址不变，成功文章陆续合并更新。';$('publish').textContent='保存并更新';$('close-config').setAttribute('aria-label','关闭编辑订阅');invalidate();status('已载入 '+config.output.title+' 的服务端配置。订阅 ID 不可修改。');$('detail-dialog').close();$('config-dialog').showModal();
 }
 $('edit-subscription').addEventListener('click',()=>editSubscription(detailData));

@@ -186,6 +186,7 @@ class TranslationConfig(StrictModel):
     enabled: bool = True
     model: Literal['deepseek-flash', 'qwen/qwen3.7-flash'] = 'qwen/qwen3.7-flash'
     target_language: Literal['zh-CN', 'en', 'ja'] = 'zh-CN'
+    translate_body: bool = False
 
 
 class OutputConfig(StrictModel):

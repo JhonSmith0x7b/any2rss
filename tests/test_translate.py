@@ -337,3 +337,45 @@ def test_failure_diagnostics_do_not_log_response_text_or_keys(monkeypatch, caplo
     assert 'item_count=1' in caplog.text
     assert 'extra_count' in caplog.text
     assert 'total_tokens' in caplog.text
+
+
+def test_title_only_sends_no_summary_or_body_and_preserves_exact_html():
+    article = dict(title='Hello', summary='Private summary',
+                   content_html='<P class="original">Secret body &amp; text<img src="x"></P>',
+                   url='https://example.com/a', author='Author')
+    original = deepcopy(article)
+    batches = []
+    async def translate(batch):
+        batches.append(batch)
+        return {key: '你好' for key in batch}
+    plugin = TranslationPlugin(translate_body=False, translate_batch=translate)
+    result = asyncio.run(plugin.apply(article))
+    assert batches == [{'t0_0': 'Hello'}]
+    assert result['title'] == '你好'
+    assert result['summary'] == original['summary']
+    assert result['content_html'] == original['content_html']
+    assert result['author'] == original['author']
+    assert article == original
+    assert result['translation']['translate_body'] is False
+    assert plugin.cache_config != TranslationPlugin().cache_config
+
+
+def test_title_only_reuses_title_batch_when_body_changes():
+    calls = []
+    cache = {}
+    async def translate(batch):
+        calls.append(batch)
+        return {key: '标题' for key in batch}
+    for body in ('<p>Original</p>', '<p>Updated</p>'):
+        plugin = TranslationPlugin(translate_body=False, translate_batch=translate, batch_cache=cache)
+        result = asyncio.run(plugin.apply({'title': 'Title', 'summary': body, 'content_html': body}))
+        assert result['content_html'] == body
+    assert calls == [{'t0_0': 'Title'}]
+
+
+def test_title_only_without_title_never_calls_provider():
+    async def translate(batch):
+        pytest.fail('Body must never be translated in title-only mode')
+    article = {'title': ' ', 'summary': 'Summary', 'content_html': '<p>Body</p>'}
+    result = asyncio.run(TranslationPlugin(translate_body=False, translate_batch=translate).apply(article))
+    assert all(result[key] == value for key, value in article.items())

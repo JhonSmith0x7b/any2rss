@@ -68,7 +68,8 @@ Agent 成功时只返回原始 JSON，不加 Markdown 围栏、表格或前后�
       "name": "llm_translate",
       "enabled": true,
       "model": "qwen/qwen3.7-flash",
-      "target_language": "zh-CN"
+      "target_language": "zh-CN",
+      "translate_body": false
     }
   ],
   "output": {
@@ -81,7 +82,7 @@ Agent 成功时只返回原始 JSON，不加 Markdown 围栏、表格或前后�
 ```
 
 以上是完整文档的附加字段片段，需要与 `schema_version` 和 `source` 合并。
-`plugins=[]` 表示不处理。当前只支持一个 `llm_translate` 插件、Qwen 3.7 Flash（默认，OpenRouter）或 DeepSeek V4.1 Flash，以及 `zh-CN` / `en` / `ja` 三种目标语言。数组形式为之后按顺序添加插件留出结构。
+`plugins=[]` 表示不处理。当前只支持一个 `llm_translate` 插件、Qwen 3.7 Flash（默认，OpenRouter）或 DeepSeek V4.1 Flash，以及 `zh-CN` / `en` / `ja` 三种目标语言。`translate_body` 默认为 `false`，只翻译标题，摘要和正文原样保留；设为 `true` 时翻译标题、摘要和正文。旧配置缺少该字段时也按只翻译标题处理，可在后台编辑开关。两种模式的翻译缓存隔离。数组形式为之后按顺序添加插件留出结构。
 
 密钥、Cookie、脚本都不能放进配置。模型密钥继续使用服务器环境配置。未知字段、未知插件、错误类型被拒绝，不静默忽略。
 
@@ -91,11 +92,11 @@ Agent 成功时只返回原始 JSON，不加 Markdown 围栏、表格或前后�
 
 `POST /api/config/publish` 接收完整配置，结构验证通过后持久化任务，返回 202 和 `status_url`。`GET /api/publications/{id}` 查看抓取/插件进度与错误；成功后 `feed_url` 为 `/feeds/{id}.xml`。`GET /api/publications` 列出服务端订阅。
 
-首次发布和定时更新均最多处理 `item_limit` 篇（实际数量受来源条目数及列表分页设置影响），启用翻译时会真实调用模型；后续按 `interval_minutes` 更新。所有条目和插件处理成功后原子发布；失败保留上一份成品。RSS 读取不会触发抓取或模型。没有提取到条目不会发布空订阅。
+首次发布和定时更新均最多处理 `item_limit` 篇（实际数量受来源条目数及列表分页设置影响），启用翻译时会真实调用模型；后续按 `interval_minutes` 更新。每篇文章完成插件处理后保存并合并到 RSS；部分失败时保留成功文章，待重试链接和原文持久化后按更新间隔重试。RSS 读取不会触发抓取或模型。没有提取到条目不会发布空订阅。
 
 同标识不能覆盖内置或已成功发布的订阅；初次失败可修正配置后用原标识重新提交。进程重启后恢复未完成任务，插件缓存持久化。Web 服务须保持运行，自定义订阅调度与内置 worker 独立。当前是本机使用，无账号权限系统；发布不等于公网部署。
 
-发布状态中的 `progress` 报告本轮阶段、阶段内完成条数、总数及最后进度时间。发现链接时总数未知，前端显示不定进度；抓取和翻译进度分别计算，不代表已发布。`count` 仍是服务端已保存的成品数，整轮成功后才更新 RSS。页面自动轮询，无需反复打开 RSS 判断任务是否工作。
+发布状态中的 `progress` 报告本轮阶段、阶段内完成条数、总数及最后进度时间。发现链接时总数未知，前端显示不定进度；抓取和翻译进度分别计算，不代表已发布。`saved_articles` 表示本轮已保存条数，`pending_articles` 表示待重试条数；`count` 是服务端已保存的成品数，RSS 随成功文章陆续更新。页面自动轮询，无需反复打开 RSS 判断任务是否工作。
 
 ## 机核完整正文
 

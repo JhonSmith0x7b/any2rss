@@ -45,18 +45,21 @@ class TranslationPlugin:
     max_batch_requests = 15
     min_split_chars = 160
 
-    def __init__(self, target_language='zh-CN', model='qwen/qwen3.7-flash', *, translate_batch=None, batch_cache=None, progress=None):
+    def __init__(self, target_language='zh-CN', model='qwen/qwen3.7-flash', *, translate_body=True, translate_batch=None, batch_cache=None, progress=None):
         self._progress_error = None
         self.progress = progress
         self._last_response_at = None
         self.target_language = target_language
         self.model = model
+        self.translate_body = translate_body
         self._translate_batch = translate_batch
         self._batch_cache = batch_cache if batch_cache is not None else {}
 
     @property
     def cache_config(self):
-        return dict(model=self.model, target_language=self.target_language, version=self.version)
+        # Preserve existing full-text caches when that mode is explicitly enabled.
+        return dict(model=self.model, target_language=self.target_language, version=self.version,
+                    **({'translate_body': False} if not self.translate_body else {}))
 
     def _emit(self, status, attempt=0):
         if self.progress is not None:
@@ -250,12 +253,12 @@ class TranslationPlugin:
         self._usage = {}
         self._last_response_at = None
         result = deepcopy(article)
-        soup = BeautifulSoup(article.get('content_html', ''), 'html.parser')
+        soup = BeautifulSoup(article.get('content_html', ''), 'html.parser') if self.translate_body else None
         targets = []
-        for field in ('title', 'summary'):
+        for field in (('title', 'summary') if self.translate_body else ('title',)):
             if article.get(field) and article[field].strip():
                 targets.append((field, article[field]))
-        for node in list(soup.find_all(string=True)):
+        for node in list(soup.find_all(string=True)) if soup is not None else []:
             if (not isinstance(node, Comment) and node.strip()
                     and not any(parent.name in ('pre', 'code', 'script', 'style') for parent in node.parents)):
                 targets.append((node, str(node)))
@@ -294,7 +297,8 @@ class TranslationPlugin:
                 target.replace_with(NavigableString(translated))
             else:
                 result[target] = translated
-        if 'content_html' in article:
+        if self.translate_body and 'content_html' in article:
             result['content_html'] = str(soup)
-        result['translation'] = dict(model=self.model, target_language=self.target_language, usage=self._usage)
+        result['translation'] = dict(model=self.model, target_language=self.target_language,
+                                     translate_body=self.translate_body, usage=self._usage)
         return result
