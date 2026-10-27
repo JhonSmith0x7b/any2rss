@@ -607,7 +607,7 @@ def test_translation_body_setting_defaults_and_edits_round_trip(client, monkeypa
     assert modes == [True, False]
 
 
-def test_existing_stored_config_without_body_setting_is_title_only(client):
+def test_existing_stored_config_without_body_setting_uses_preview_mode(client):
     import json
     publish(client, draft(plugins=[{'name': 'llm_translate', 'enabled': True}]))
     with storage.connect() as db:

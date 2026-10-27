@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import deepcopy
+from html import escape
 import json
 import logging
 import re
@@ -44,6 +45,7 @@ class TranslationPlugin:
     max_split_depth = 4
     max_batch_requests = 15
     min_split_chars = 160
+    preview_chars = 500
 
     def __init__(self, target_language='zh-CN', model='qwen/qwen3.7-flash', *, translate_body=True, translate_batch=None, batch_cache=None, progress=None):
         self._progress_error = None
@@ -59,7 +61,7 @@ class TranslationPlugin:
     def cache_config(self):
         # Preserve existing full-text caches when that mode is explicitly enabled.
         return dict(model=self.model, target_language=self.target_language, version=self.version,
-                    **({'translate_body': False} if not self.translate_body else {}))
+                    **({'translate_body': False, 'preview_chars': self.preview_chars} if not self.translate_body else {}))
 
     def _emit(self, status, attempt=0):
         if self.progress is not None:
@@ -253,14 +255,24 @@ class TranslationPlugin:
         self._usage = {}
         self._last_response_at = None
         result = deepcopy(article)
-        soup = BeautifulSoup(article.get('content_html', ''), 'html.parser') if self.translate_body else None
+        soup = BeautifulSoup(article.get('content_html', ''), 'html.parser')
         targets = []
         for field in (('title', 'summary') if self.translate_body else ('title',)):
             if article.get(field) and article[field].strip():
                 targets.append((field, article[field]))
-        for node in list(soup.find_all(string=True)) if soup is not None else []:
+        body_nodes = []
+        for node in list(soup.find_all(string=True)):
             if (not isinstance(node, Comment) and node.strip()
                     and not any(parent.name in ('pre', 'code', 'script', 'style') for parent in node.parents)):
+                body_nodes.append(node)
+        preview = ''
+        if not self.translate_body:
+            text = ' '.join(' '.join(str(node).split()) for node in body_nodes)
+            preview = text[:self.preview_chars].rstrip()
+            if preview:
+                targets.append(('summary', preview))
+        else:
+            for node in body_nodes:
                 targets.append((node, str(node)))
 
         batches, batch, size, target_ids = [], {}, 0, []
@@ -299,6 +311,8 @@ class TranslationPlugin:
                 result[target] = translated
         if self.translate_body and 'content_html' in article:
             result['content_html'] = str(soup)
+        elif preview:
+            result['content_html'] = '<blockquote><p>' + escape(result['summary']) + '</p></blockquote>\n' + article.get('content_html', '')
         result['translation'] = dict(model=self.model, target_language=self.target_language,
                                      translate_body=self.translate_body, usage=self._usage)
         return result

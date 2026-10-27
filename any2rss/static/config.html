@@ -66,7 +66,7 @@ body:has(dialog[open])>.position-nav,body:has(dialog[open])>.position-label,body
 <label class="switch" for="translate"><input type="checkbox" id="translate">使用</label></div>
 <div class="fields" id="translation-fields" hidden><div>
 <label for="model">模型</label><select id="model"><option value="qwen/qwen3.7-flash">Qwen 3.7 Flash（OpenRouter）</option><option value="deepseek-flash">DeepSeek V4.1 Flash</option></select></div><div>
-<label for="language">目标语言</label><select id="language"><option value="zh-CN">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select></div><div><label class="switch" for="translate-body"><input type="checkbox" id="translate-body">翻译正文</label><p class="hint">关闭时仅翻译标题，摘要和正文保留原文。</p></div></div><p class="hint">密钥由服务端配置。发布后由后台执行翻译；首次处理可能需要几分钟。</p></section>
+<label for="language">目标语言</label><select id="language"><option value="zh-CN">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select></div><div><label class="switch" for="translate-body"><input type="checkbox" id="translate-body">翻译全文</label><p class="hint">关闭时翻译标题及正文前 500 字（纯文本），译文预览显示在摘要和正文开头，完整原文保留；开启时翻译标题、摘要和全文。</p></div></div><p class="hint">密钥由服务端配置。发布后由后台执行翻译；首次处理可能需要几分钟。</p></section>
 
 
 <section class="panel"><div class="panel-head"><h2><span class="section-no">03</span>订阅输出</h2><span class="hint">OUTPUT</span></div>
@@ -107,7 +107,7 @@ const editable=['web-url','goal','source-json','rss-url','translate','translate-
 function status(message,error=false){$('status').textContent=message;$('status').classList.toggle('error',error)}
 function invalidate(){revision++;validated=null;validationRevision=-1;$('save').disabled=true;$('export').disabled=true;$('validation-badge').textContent='尚未校验';updateSummary()}
 function updateSummary(){
- $('summary-mode').textContent=mode==='webpage'?'网页 → RSS':'RSS → RSS';$('summary-plugin').textContent=$('translate').checked?'AI 翻译 · '+($('translate-body').checked?'标题与正文':'仅标题')+' · '+$('language').selectedOptions[0].textContent:'保留原文';
+ $('summary-mode').textContent=mode==='webpage'?'网页 → RSS':'RSS → RSS';$('summary-plugin').textContent=$('translate').checked?'AI 翻译 · '+($('translate-body').checked?'标题、摘要与全文':'标题 + 前 500 字')+' · '+$('language').selectedOptions[0].textContent:'保留原文';
  let sourceUrl=$('rss-url').value;if(mode==='webpage'){try{sourceUrl=JSON.parse($('source-json').value).source?.url||'尚未填写'}catch{sourceUrl='JSON 待修正'}}$('summary-url').textContent=sourceUrl||'—';
  $('summary-title').textContent=$('feed-title').value||'—';$('translation-fields').hidden=!$('translate').checked;
 }
@@ -232,7 +232,7 @@ function renderDetail(data){
  $('detail-heading').textContent=data.title||data.id;$('detail-id').textContent=data.id;$('detail-meta').replaceChildren();
  metaRow('管理方式',data.kind==='builtin'?'内置订阅 · 由服务端管理':'自定义订阅');metaRow('采集方式',data.source_type==='rss'?'RSS → RSS':'网页 → RSS');metaRow('来源地址',safeLink(data.source_url,data.source_url||'未提供'));metaRow('更新间隔',data.interval_minutes?data.interval_minutes+' 分钟':'由服务端调度');metaRow('条目上限',data.item_limit??'由服务端管理');
  const plugins=Array.isArray(data.plugins)?data.plugins.filter(plugin=>plugin.enabled!==false):[];
- metaRow('内容处理',plugins.length?plugins.map(plugin=>plugin.name==='llm_translate'?'AI 翻译 · '+(plugin.translate_body===true?'标题与正文':'仅标题')+' · '+(plugin.target_language||'默认语言')+' · '+(plugin.model||'默认模型'):plugin.name).join('；'):'保留原文');
+ metaRow('内容处理',plugins.length?plugins.map(plugin=>plugin.name==='llm_translate'?'AI 翻译 · '+(plugin.translate_body===true?'标题、摘要与全文':'标题 + 前 500 字')+' · '+(plugin.target_language||'默认语言')+' · '+(plugin.model||'默认模型'):plugin.name).join('；'):'保留原文');
  $('detail-articles').replaceChildren();const entries=Array.isArray(data.items)?data.items:[];
  if(!entries.length){const empty=document.createElement('p');empty.className='hint';empty.textContent='暂无已发布文章，文章成功保存后会显示在这里。';$('detail-articles').append(empty)}
  for(const item of entries){const article=document.createElement('article');article.className='detail-article';article.append(safeLink(item.url,item.title||'无标题'));const date=document.createElement('p');date.className='hint';date.textContent=item.published_at&&!Number.isNaN(Date.parse(item.published_at))?new Date(item.published_at).toLocaleString('zh-CN',{hour12:false}):'日期未标注';article.append(date);if(item.summary){const summary=document.createElement('p');summary.className='article-summary';summary.textContent=item.summary;article.append(summary)}$('detail-articles').append(article)}

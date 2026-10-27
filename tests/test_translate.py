@@ -339,43 +339,94 @@ def test_failure_diagnostics_do_not_log_response_text_or_keys(monkeypatch, caplo
     assert 'total_tokens' in caplog.text
 
 
-def test_title_only_sends_no_summary_or_body_and_preserves_exact_html():
-    article = dict(title='Hello', summary='Private summary',
-                   content_html='<P class="original">Secret body &amp; text<img src="x"></P>',
+def test_preview_translates_body_prefix_and_keeps_original_html():
+    text = '文😀' * 300
+    body = '<P class="original">' + text + '<img src="x"></P>'
+    article = dict(title='Hello', summary='Unrelated summary', content_html=body,
                    url='https://example.com/a', author='Author')
     original = deepcopy(article)
     batches = []
     async def translate(batch):
         batches.append(batch)
-        return {key: '你好' for key in batch}
+        return {key: '译文<script>alert(1)</script>&' for key in batch}
     plugin = TranslationPlugin(translate_body=False, translate_batch=translate)
     result = asyncio.run(plugin.apply(article))
-    assert batches == [{'t0_0': 'Hello'}]
-    assert result['title'] == '你好'
-    assert result['summary'] == original['summary']
-    assert result['content_html'] == original['content_html']
+    assert batches == [{'t0_0': 'Hello', 't1_0': text[:500]}]
+    assert len(batches[0]['t1_0']) == 500
+    assert result['summary'] == '译文<script>alert(1)</script>&'
+    assert result['content_html'].endswith(body)
+    soup = BeautifulSoup(result['content_html'], 'html.parser')
+    assert soup.blockquote.get_text() == result['summary']
+    assert not soup.script
+    assert soup.img['src'] == 'x'
     assert result['author'] == original['author']
     assert article == original
     assert result['translation']['translate_body'] is False
     assert plugin.cache_config != TranslationPlugin().cache_config
+    assert plugin.cache_config['preview_chars'] == 500
 
 
-def test_title_only_reuses_title_batch_when_body_changes():
+def test_preview_cache_ignores_changes_after_first_500_chars():
     calls = []
     cache = {}
     async def translate(batch):
         calls.append(batch)
-        return {key: '标题' for key in batch}
-    for body in ('<p>Original</p>', '<p>Updated</p>'):
+        return {key: '译文' for key in batch}
+    for tail in ('Original', 'Updated'):
+        body = '<p>' + 'x' * 500 + tail + '</p>'
         plugin = TranslationPlugin(translate_body=False, translate_batch=translate, batch_cache=cache)
-        result = asyncio.run(plugin.apply({'title': 'Title', 'summary': body, 'content_html': body}))
-        assert result['content_html'] == body
-    assert calls == [{'t0_0': 'Title'}]
+        result = asyncio.run(plugin.apply({'title': 'Title', 'summary': tail, 'content_html': body}))
+        assert result['content_html'].endswith(body)
+    assert calls == [{'t0_0': 'Title', 't1_0': 'x' * 500}]
 
 
-def test_title_only_without_title_never_calls_provider():
+def test_preview_normalizes_text_skips_nonprose_and_translates_short_body():
+    calls = []
     async def translate(batch):
-        pytest.fail('Body must never be translated in title-only mode')
-    article = {'title': ' ', 'summary': 'Summary', 'content_html': '<p>Body</p>'}
+        calls.append(batch)
+        return {key: '译文' for key in batch}
+    body = '<p>  Hello\n <b>world</b> &amp; all </p><!-- hidden --><script>secret</script><style>style</style><pre>code</pre>'
+    result = asyncio.run(TranslationPlugin(translate_body=False, translate_batch=translate).apply(
+        {'title': ' ', 'summary': 'Not body', 'content_html': body}))
+    assert calls == [{'t0_0': 'Hello world & all'}]
+    assert result['summary'] == '译文'
+    assert result['content_html'].endswith(body)
+
+
+def test_preview_without_body_translates_only_title():
+    calls = []
+    async def translate(batch):
+        calls.append(batch)
+        return {key: '标题' for key in batch}
+    article = {'title': 'Title', 'summary': 'Summary', 'content_html': '<img src="x">'}
     result = asyncio.run(TranslationPlugin(translate_body=False, translate_batch=translate).apply(article))
-    assert all(result[key] == value for key, value in article.items())
+    assert calls == [{'t0_0': 'Title'}]
+    assert result['summary'] == article['summary']
+    assert result['content_html'] == article['content_html']
+
+
+def test_preview_mode_does_not_reuse_old_title_only_cache():
+    from any2rss.pipeline import cache_key
+    article = {'title': 'Title', 'content_html': '<p>Body</p>'}
+    old = type('OldPlugin', (), {'name': 'llm_translate', 'cache_config': {
+        'model': 'qwen/qwen3.7-flash', 'target_language': 'zh-CN', 'version': '1', 'translate_body': False}})()
+    assert cache_key(article, old) != cache_key(article, TranslationPlugin(translate_body=False))
+
+
+@pytest.mark.parametrize('kind', [None, 'rss_description'])
+def test_preview_visible_in_rss_description_and_full_content(kind):
+    import xml.etree.ElementTree as ET
+    from any2rss.feed import render, CONTENT
+    article = dict(title='Title', summary='Summary', content_html='<p>Original body</p>',
+                   url='https://example.com/a', author='Author', source='Source', category='',
+                   published_at='2026-10-27T00:00:00+00:00')
+    if kind:
+        article['content_kind'] = kind
+    async def translate(batch):
+        return {key: '中文预览' for key in batch}
+    result = asyncio.run(TranslationPlugin(translate_body=False, translate_batch=translate).apply(article))
+    root = ET.fromstring(render([result], metadata={'title': 'Feed'}))
+    item = root.find('./channel/item')
+    assert '中文预览' in item.findtext('description')
+    full = item.findtext('description') if kind else item.findtext('{' + CONTENT + '}encoded')
+    assert full.index('中文预览') < full.index('Original body')
