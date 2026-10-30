@@ -31,7 +31,7 @@ class TranslationConfigurationError(RuntimeError):
 
 
 def redact_translation_secrets(message):
-    for name in ('DEEPSEEK_API_KEY', 'OPENROUTER_API_KEY'):
+    for name in ('DEEPSEEK_API_KEY', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY'):
         key = os.environ.get(name, '').strip()
         if key:
             message = message.replace(key, '[redacted]')
@@ -47,7 +47,7 @@ class TranslationPlugin:
     min_split_chars = 160
     preview_chars = 500
 
-    def __init__(self, target_language='zh-CN', model='qwen/qwen3.7-flash', *, translate_body=True, translate_batch=None, batch_cache=None, progress=None):
+    def __init__(self, target_language='zh-CN', model='gpt-6-luna', *, translate_body=True, translate_batch=None, batch_cache=None, progress=None):
         self._progress_error = None
         self.progress = progress
         self._last_response_at = None
@@ -104,7 +104,11 @@ class TranslationPlugin:
         self._requests_remaining -= 1
 
     async def _request_batch(self, batch):
-        if self.model == 'deepseek-flash':
+        if self.model == 'gpt-6-luna':
+            key_name = 'OPENAI_API_KEY'
+            endpoint = 'https://api.openai.com/v1/chat/completions'
+            options = {'reasoning_effort': 'none', 'max_completion_tokens': 8192}
+        elif self.model == 'deepseek-flash':
             key_name = 'DEEPSEEK_API_KEY'
             endpoint = 'https://api.deepseek.com/chat/completions'
             options = {'thinking': {'type': 'disabled'}}
@@ -121,7 +125,7 @@ class TranslationPlugin:
             'model': self.model,
             **options,
             'response_format': {'type': 'json_object'},
-            'max_tokens': 8192,
+            **({'max_tokens': 8192} if self.model != 'gpt-6-luna' else {}),
             'messages': [
                 {'role': 'system', 'content': (
                     f'Translate all supplied text values into {self.target_language}. '

@@ -20,9 +20,12 @@ ANY2RSS_PUBLIC_URL=https://YOUR-PUBLIC-HOST/any2rss
 ANY2RSS_AUTH_USERNAME=GENERATED-USERNAME
 ANY2RSS_AUTH_PASSWORD_HASH=scrypt$SALT$HASH
 ANY2RSS_AUTH_SECRET=GENERATED-RANDOM-SECRET
+OPENAI_API_KEY=YOUR-OPENAI-API-KEY
 OPENROUTER_API_KEY=YOUR-OPENROUTER-API-KEY
 DEEPSEEK_API_KEY=YOUR-DEEPSEEK-API-KEY
 ```
+
+默认翻译模型 GPT-6 Luna 使用 `OPENAI_API_KEY` 并直连 OpenAI 官方 API；其余两个翻译密钥仅在选择对应模型时需要。
 
 不要给 env 值加引号；Compose 使用 raw 模式保留密码哈希中的 `$`。使用 `any2rss.auth.hash_password()` 生成密码哈希，使用密码管理器或密码学随机数生成用户名、密码与会话密钥。明文登录密码仅保存在本机凭据文件或密码管理器。
 

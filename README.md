@@ -15,7 +15,7 @@ python3 -m venv .venv
 
 - 网页来源：输入网址和需求，复制提示词交给可访问网页的 Agent，粘贴返回 JSON。支持 HTTP、Playwright、列表分页及正文排除规则。
 - RSS 来源：填入 RSS 2.0 地址即可。
-- 可选 AI 翻译：默认 Qwen 3.7 Flash（OpenRouter，`qwen/qwen3.7-flash`），在本机 `.env` 设置 `OPENROUTER_API_KEY`；也可选择 DeepSeek Flash（`deepseek-flash`），使用 `DEEPSEEK_API_KEY`。语言支持简体中文、英语和日语，密钥不写入订阅 JSON。默认翻译标题及正文前 500 字（提取纯文本后按 Unicode 字符计数），译文预览用于 RSS 摘要并显示在正文开头，后面保留完整原文；后台可开启“翻译全文”以翻译标题、摘要和全文。旧配置未指定 `translate_body` 时同样使用预览模式，历史成品随后续正常更新替换。
+- 可选 AI 翻译：默认 GPT-6 Luna（OpenAI 官方，`gpt-6-luna`），在本机 `.env` 设置 `OPENAI_API_KEY`，通过 `https://api.openai.com/v1/chat/completions` 调用并关闭推理以控制翻译开销；也可选择 Qwen 3.7 Flash（OpenRouter，`qwen/qwen3.7-flash`），使用 `OPENROUTER_API_KEY`，或 DeepSeek Flash（`deepseek-flash`），使用 `DEEPSEEK_API_KEY`。语言支持简体中文、英语和日语，密钥不写入订阅 JSON。默认翻译标题及正文前 500 字（提取纯文本后按 Unicode 字符计数），译文预览用于 RSS 摘要并显示在正文开头，后面保留完整原文；后台可开启“翻译全文”以翻译标题、摘要和全文。旧配置未指定 `translate_body` 时同样使用预览模式，历史成品随后续正常更新替换。
 - 发布按真实条目上限抓取并执行插件，每篇成功后立即保存并合并到 `/feeds/{id}.xml`；每 3 秒更新页面进度。定时更新由 Web 服务调度，须保持服务运行。
 - 详情中可编辑或删除。编辑保留 RSS 地址，部分成功时保留旧文章并合并新文章；新配置全部完成后切换为新内容。删除停止调度并关闭 RSS 入口，本机历史记录保留，ID 暂不重复使用。
 - 后台最多同时处理 2 个订阅；翻译显示文章、批次、重试与最近响应时间。格式错误会在请求预算内拆小批次恢复，单篇失败后继续处理其余文章并补试一次；仍有失败则显示“部分成功”，成功文章已发布；失败文章、超时未开始的链接和待翻译原文持久化，下轮按订阅更新间隔重试，即使文章已从列表页消失也会重试。

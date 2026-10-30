@@ -32,8 +32,8 @@ def test_translates_text_without_modifying_html_or_original():
     assert not soup.find('b')
     assert len(batches[0]) == 4
     assert article == original
-    assert result['translation']['model'] == 'qwen/qwen3.7-flash'
-    assert plugin.cache_config == dict(model='qwen/qwen3.7-flash', target_language='zh-CN', version='1')
+    assert result['translation']['model'] == 'gpt-6-luna'
+    assert plugin.cache_config == dict(model='gpt-6-luna', target_language='zh-CN', version='1')
 
 
 def test_long_node_split_and_successful_batches_cached_after_failure():
@@ -81,18 +81,25 @@ def mock_http(monkeypatch, handler):
     original_client = httpx.AsyncClient
     monkeypatch.setenv('DEEPSEEK_API_KEY', 'secret-test-value')
     monkeypatch.setenv('OPENROUTER_API_KEY', 'openrouter-test-value')
+    monkeypatch.setenv('OPENAI_API_KEY', 'openai-test-value')
     monkeypatch.setattr('any2rss.plugins.translate.httpx.AsyncClient',
                         lambda **kwargs: original_client(transport=httpx.MockTransport(handler), **kwargs))
 
 
-@pytest.mark.parametrize('model', ['deepseek-flash', 'qwen/qwen3.7-flash'])
+@pytest.mark.parametrize('model', ['deepseek-flash', 'qwen/qwen3.7-flash', 'gpt-6-luna'])
 def test_http_payload_and_usage(monkeypatch, model):
     import json
 
     def handler(request):
         payload = json.loads(request.content)
         assert payload['model'] == model
-        if model == 'deepseek-flash':
+        if model == 'gpt-6-luna':
+            assert str(request.url) == 'https://api.openai.com/v1/chat/completions'
+            assert request.headers['Authorization'] == 'Bearer openai-test-value'
+            assert payload['reasoning_effort'] == 'none'
+            assert payload['max_completion_tokens'] == 8192
+            assert not {'max_tokens', 'thinking', 'reasoning', 'provider'} & payload.keys()
+        elif model == 'deepseek-flash':
             assert str(request.url) == 'https://api.deepseek.com/chat/completions'
             assert request.headers['Authorization'] == 'Bearer secret-test-value'
             assert payload['thinking'] == {'type': 'disabled'}
@@ -103,7 +110,8 @@ def test_http_payload_and_usage(monkeypatch, model):
             assert payload['reasoning'] == {'enabled': False}
             assert payload['provider'] == {'require_parameters': True}
             assert 'thinking' not in payload
-        assert payload['max_tokens'] == 8192
+        if model != 'gpt-6-luna':
+            assert payload['max_tokens'] == 8192
         assert payload['response_format'] == {'type': 'json_object'}
         return httpx.Response(200, json={
             'choices': [{'finish_reason': 'stop', 'message': {'content': '{"t0_0": "你好"}'}}],
@@ -216,6 +224,7 @@ def test_injected_empty_batch_cache_reused_across_instances():
 @pytest.mark.parametrize('model,key_name', [
     ('deepseek-flash', 'DEEPSEEK_API_KEY'),
     ('qwen/qwen3.7-flash', 'OPENROUTER_API_KEY'),
+    ('gpt-6-luna', 'OPENAI_API_KEY'),
 ])
 def test_missing_provider_key_names_correct_setting(monkeypatch, model, key_name):
     monkeypatch.setenv('DEEPSEEK_API_KEY', 'deepseek-test')
@@ -232,17 +241,18 @@ def test_model_change_does_not_reuse_other_provider_batch_cache():
         calls.append(batch)
         return {key: '中文' for key in batch}
 
-    for model in ('deepseek-flash', 'qwen/qwen3.7-flash'):
+    for model in ('deepseek-flash', 'qwen/qwen3.7-flash', 'gpt-6-luna'):
         asyncio.run(TranslationPlugin(model=model, translate_batch=translate,
                                      batch_cache=cache).apply({'title': 'Hello'}))
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
-def test_redacts_both_provider_keys(monkeypatch):
+def test_redacts_all_provider_keys(monkeypatch):
     from any2rss.plugins.translate import redact_translation_secrets
     monkeypatch.setenv('DEEPSEEK_API_KEY', 'deepseek-test')
     monkeypatch.setenv('OPENROUTER_API_KEY', 'openrouter-test')
-    assert redact_translation_secrets('deepseek-test openrouter-test') == '[redacted] [redacted]'
+    monkeypatch.setenv('OPENAI_API_KEY', 'openai-test')
+    assert redact_translation_secrets('deepseek-test openrouter-test openai-test') == '[redacted] [redacted] [redacted]'
 
 
 def test_split_children_cached_across_failure_and_new_instance():

@@ -65,7 +65,7 @@ body:has(dialog[open])>.position-nav,body:has(dialog[open])>.position-label,body
 <section class="panel"><div class="panel-head"><h2><span class="section-no">02</span>内容处理插件</h2><span class="hint">OPTIONAL</span></div><div class="panel-head"><span class="plugin-icon">文</span><div class="plugin-info"><h3 style="margin:0">AI 翻译</h3><small>翻译订阅内容，保留阅读线索</small></div>
 <label class="switch" for="translate"><input type="checkbox" id="translate">使用</label></div>
 <div class="fields" id="translation-fields" hidden><div>
-<label for="model">模型</label><select id="model"><option value="qwen/qwen3.7-flash">Qwen 3.7 Flash（OpenRouter）</option><option value="deepseek-flash">DeepSeek V4.1 Flash</option></select></div><div>
+<label for="model">模型</label><select id="model"><option value="gpt-6-luna">GPT-6 Luna（OpenAI 官方）</option><option value="qwen/qwen3.7-flash">Qwen 3.7 Flash（OpenRouter）</option><option value="deepseek-flash">DeepSeek V4.1 Flash</option></select></div><div>
 <label for="language">目标语言</label><select id="language"><option value="zh-CN">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select></div><div><label class="switch" for="translate-body"><input type="checkbox" id="translate-body">翻译全文</label><p class="hint">关闭时翻译标题及正文前 500 字（纯文本），译文预览显示在摘要和正文开头，完整原文保留；开启时翻译标题、摘要和全文。</p></div></div><p class="hint">密钥由服务端配置。发布后由后台执行翻译；首次处理可能需要几分钟。</p></section>
 
 
@@ -256,7 +256,7 @@ function editSubscription(detailData){
  if(!spec||!detailData?.config||detailData.kind!=='custom'||submitting)return;
  const config=structuredClone(detailData.config);newDraftSnapshot={mode,form:capture(),drafts:structuredClone(drafts)};editId=detailData.id;
  switchMode(config.source.type);const plugin=config.plugins.find(p=>p.name==='llm_translate');
- restore({'source-json':JSON.stringify({schema_version:config.schema_version,source:config.source},null,2),'web-url':config.source.url,'rss-url':config.source.url,'goal':'','feed-title':config.output.title,'feed-id':config.output.id,'interval':String(config.output.interval_minutes),'item-limit':String(config.output.item_limit),'translate':!!plugin&&plugin.enabled!==false,'translate-body':!!plugin&&plugin.translate_body===true,'model':plugin?.model||'qwen/qwen3.7-flash','language':plugin?.target_language||'zh-CN'});
+ restore({'source-json':JSON.stringify({schema_version:config.schema_version,source:config.source},null,2),'web-url':config.source.url,'rss-url':config.source.url,'goal':'','feed-title':config.output.title,'feed-id':config.output.id,'interval':String(config.output.interval_minutes),'item-limit':String(config.output.item_limit),'translate':!!plugin&&plugin.enabled!==false,'translate-body':!!plugin&&plugin.translate_body===true,'model':plugin?.model||'gpt-6-luna','language':plugin?.target_language||'zh-CN'});
  $('feed-id').readOnly=true;$('save').hidden=true;$('config-heading').textContent='编辑订阅';$('config-description').textContent='保存后按新配置更新；RSS 地址不变，成功文章陆续合并更新。';$('publish').textContent='保存并更新';$('close-config').setAttribute('aria-label','关闭编辑订阅');invalidate();status('已载入 '+config.output.title+' 的服务端配置。订阅 ID 不可修改。');$('detail-dialog').close();$('config-dialog').showModal();
 }
 $('edit-subscription').addEventListener('click',()=>editSubscription(detailData));

@@ -67,7 +67,7 @@ Agent 成功时只返回原始 JSON，不加 Markdown 围栏、表格或前后�
     {
       "name": "llm_translate",
       "enabled": true,
-      "model": "qwen/qwen3.7-flash",
+      "model": "gpt-6-luna",
       "target_language": "zh-CN",
       "translate_body": false
     }
@@ -82,7 +82,7 @@ Agent 成功时只返回原始 JSON，不加 Markdown 围栏、表格或前后�
 ```
 
 以上是完整文档的附加字段片段，需要与 `schema_version` 和 `source` 合并。
-`plugins=[]` 表示不处理。当前只支持一个 `llm_translate` 插件、Qwen 3.7 Flash（默认，OpenRouter）或 DeepSeek V4.1 Flash，以及 `zh-CN` / `en` / `ja` 三种目标语言。`translate_body` 默认为 `false`，翻译标题及正文纯文本的前 500 个 Unicode 字符（不足 500 字时取全部）。译文预览作为 RSS 摘要，并在 HTML 转义后放到正文开头，后面保留完整原文；设为 `true` 时翻译标题、摘要和全文。旧配置缺少该字段时也使用预览模式，可在后台通过“翻译全文”开关切换。两种模式的翻译缓存隔离。数组形式为之后按顺序添加插件留出结构。
+`plugins=[]` 表示不处理。当前只支持一个 `llm_translate` 插件、GPT-6 Luna（默认，OpenAI 官方）、Qwen 3.7 Flash（OpenRouter）或 DeepSeek V4.1 Flash，以及 `zh-CN` / `en` / `ja` 三种目标语言。GPT-6 Luna 使用 `OPENAI_API_KEY` 和官方接口 `https://api.openai.com/v1/chat/completions`，推理设置为 `none`。`translate_body` 默认为 `false`，翻译标题及正文纯文本的前 500 个 Unicode 字符（不足 500 字时取全部）。译文预览作为 RSS 摘要，并在 HTML 转义后放到正文开头，后面保留完整原文；设为 `true` 时翻译标题、摘要和全文。旧配置缺少该字段时也使用预览模式，可在后台通过“翻译全文”开关切换。两种模式的翻译缓存隔离。数组形式为之后按顺序添加插件留出结构。
 
 密钥、Cookie、脚本都不能放进配置。模型密钥继续使用服务器环境配置。未知字段、未知插件、错误类型被拒绝，不静默忽略。
 
